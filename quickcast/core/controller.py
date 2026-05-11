@@ -192,10 +192,6 @@ class MacroController:
             return
         if not changed:
             return
-        verb = "기존 프로필 적용" if used_existing else "새 프로필 생성"
-        logger.info(
-            f"📐 화면비 전환: {aspect}  ({size[0]}×{size[1]})  → {verb}"
-        )
         try:
             from quickcast.ui.design.signals import bus
             bus.aspect_changed.emit(aspect, bool(used_existing))

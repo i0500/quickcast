@@ -96,6 +96,14 @@ def classify_aspect(width: int, height: int) -> str:
     return min(ASPECT_BUCKETS, key=lambda kv: abs(kv[0] - r))[1]
 
 
+def _aspect_ratio(label: str) -> float:
+    """Return the w/h ratio for a bucket label (defaults to 16:9)."""
+    for r, lab in ASPECT_BUCKETS:
+        if lab == label:
+            return float(r)
+    return 16.0 / 9.0
+
+
 class Slot(BaseModel):
     """Generic action slot (1~9, 0, and dynamically added 11+)."""
     label: str
@@ -307,6 +315,38 @@ class Settings(BaseModel):
         self.potion.cap = Point(x=p.potion_cap.x, y=p.potion_cap.y)
         self.potion.cap_w, self.potion.cap_h = int(p.potion_cap_w), int(p.potion_cap_h)
 
+    @staticmethod
+    def _scale_profile_y(p: RoiProfile, scale: float) -> RoiProfile:
+        """Scale a profile's vertical coords/heights by `scale`.
+
+        Used when seeding a never-seen aspect bucket from the previous
+        one: assumes the captured client area has equal *width* in both
+        ratios (typical for fullscreen / maximised game windows) and
+        that HUD elements are anchored near the top edge, so the
+        normalised-to-1280×720 y value scales as ``aspect_new/aspect_old``
+        (≡ ``h_old/h_new``). X coordinates pass through unchanged.
+
+        PK / Potion box widths/heights are pinned to the embedded
+        template image dimensions by the recognizer, so we leave their
+        sizes untouched and scale only their (x, y) anchor.
+        """
+        def sy(v: int) -> int:
+            return max(0, int(round(v * scale)))
+
+        def sh(v: int) -> int:
+            return max(1, int(round(v * scale)))
+
+        return RoiProfile(
+            hp_cap=Point(x=p.hp_cap.x, y=sy(p.hp_cap.y)),
+            hp_cap_w=p.hp_cap_w, hp_cap_h=sh(p.hp_cap_h),
+            mp_cap=Point(x=p.mp_cap.x, y=sy(p.mp_cap.y)),
+            mp_cap_w=p.mp_cap_w, mp_cap_h=sh(p.mp_cap_h),
+            pk_cap=Point(x=p.pk_cap.x, y=sy(p.pk_cap.y)),
+            pk_cap_w=p.pk_cap_w, pk_cap_h=p.pk_cap_h,
+            potion_cap=Point(x=p.potion_cap.x, y=sy(p.potion_cap.y)),
+            potion_cap_w=p.potion_cap_w, potion_cap_h=p.potion_cap_h,
+        )
+
     def sync_aspect(self, aspect: str) -> tuple[bool, bool]:
         """Make `aspect` the active profile.
 
@@ -333,9 +373,25 @@ class Settings(BaseModel):
             self._apply_profile(self.roi_profiles[aspect])
             used_existing = True
         else:
-            # First time seeing this aspect — clone current coords as the
-            # starting point so the user has something visible to adjust.
-            self.roi_profiles[aspect] = self._snapshot_active_profile()
+            # First time seeing this aspect — seed by scaling the current
+            # coords proportionally (aspect_new / aspect_old) so HUD that
+            # was lined up in the old ratio lands close to the right
+            # spot in the new ratio's stretched 1280×720 frame. Top-anchored
+            # HUD (HP / MP / minimap on Lineage W) ends up almost exactly
+            # right; centre/bottom-anchored elements may need a small
+            # nudge, which the user applies once and that adjusted profile
+            # is persisted for next time.
+            seed = self._snapshot_active_profile()
+            if self.active_aspect:
+                scale = _aspect_ratio(aspect) / _aspect_ratio(self.active_aspect)
+                if scale > 0 and scale != 1.0:
+                    seed = Settings._scale_profile_y(seed, scale)
+            self.roi_profiles[aspect] = seed
+            # Mirror the seed into the live top-level coords so the next
+            # capture grab sees the converted values immediately (without
+            # this the user would briefly see the old-ratio coords drawn
+            # on the new-ratio frame).
+            self._apply_profile(seed)
         self.active_aspect = aspect
         return True, used_existing
 
