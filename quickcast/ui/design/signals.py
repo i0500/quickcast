@@ -33,6 +33,11 @@ class _SignalBus(QObject):
     # listen so they can re-attach to the new hwnd without the user
     # having to re-pick from the Capture section.
     game_window_found = Signal(int, str)    # (hwnd, title)
+    # User saved a new digit-template set via the OCR calibration
+    # dialog. Recognizer subscribes and reloads its in-memory templates
+    # so the next frame's OCR sees the freshly learned glyphs without
+    # an app restart.
+    digit_templates_changed = Signal()
     # Live captured frame (numpy BGRA), latest analysis, and fps.
     # Emitted from AppWindow so any widget (dashboard preview, fullscreen
     # window, …) can mirror the real game image without each rebuilding

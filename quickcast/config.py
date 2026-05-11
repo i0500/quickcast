@@ -228,6 +228,26 @@ class Settings(BaseModel):
     mp_cap_w: int = 157
     mp_cap_h: int = 6
 
+    # Text-mode OCR regions. When non-empty (w*h > 0) AND digit
+    # templates have been learned, recognition prefers OCR over the
+    # colour-bar / template-image readers for HP / MP / potion. Empty
+    # by default → falls back to the legacy detectors so existing users
+    # keep working without learning anything.
+    hp_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    hp_text_cap_w: int = 0
+    hp_text_cap_h: int = 0
+    mp_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    mp_text_cap_w: int = 0
+    mp_text_cap_h: int = 0
+    potion_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    potion_text_cap_w: int = 0
+    potion_text_cap_h: int = 0
+    # When True, recognition.py reads from the *_text_cap ROIs via the
+    # learned digit OCR. False ⇒ legacy detectors. UI toggles this; the
+    # individual *_text_cap fields are still kept so the user can train
+    # without immediately committing the macro to OCR.
+    ocr_mode: bool = False
+
     # Slots — keyed by string id ("1".."9", "0", "11"+)
     slots: dict[str, Slot] = Field(default_factory=dict)
     pk: PkSlot = Field(default_factory=PkSlot)

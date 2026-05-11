@@ -7,12 +7,14 @@ saves with debounce.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QMessageBox,
+    QVBoxLayout, QWidget,
 )
 
 from quickcast.ui.components.card import Card
@@ -262,6 +264,159 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.potion.cap_h, lambda v: setattr(mock_settings.potion, "cap_h", v),
     ))
     v.addWidget(roi)
+
+    # ────────────────── OCR (텍스트 기반 인식) ──────────────────
+    ocr_card = Card(
+        "OCR — 텍스트 기반 인식 (베타)",
+        subtitle=(
+            "HP/MP/물약 숫자를 텍스트로 직접 읽습니다. 화면 크기 어디서나 자동 추적.\n"
+            "1) [자동 영역 검출] → 2) 각 글자 1회 [학습] → 3) [OCR 모드 사용] 체크"
+        ),
+    )
+
+    # Latest frame stash — bus.live_frame keeps it fresh.
+    state = {"frame": None}    # type: dict[str, Optional[np.ndarray]]
+    def _on_live_frame(image, _analysis, _fps):
+        state["frame"] = image
+    bus.live_frame.connect(_on_live_frame)
+
+    # OCR-mode toggle
+    mode_row = QHBoxLayout(); mode_row.setSpacing(8)
+    mode_cb = QCheckBox("OCR 모드 사용 (학습된 글자 + 텍스트 영역으로 인식)")
+    mode_cb.setChecked(bool(getattr(mock_settings, "ocr_mode", False)))
+    def _on_mode(checked: bool) -> None:
+        mock_settings.ocr_mode = bool(checked)
+        bus.settings_dirty.emit()
+    mode_cb.toggled.connect(_on_mode)
+    mode_row.addWidget(mode_cb); mode_row.addStretch(1)
+    ocr_card.add(mode_row)
+
+    # Auto-detect button (fills HP/MP/POTION text ROIs from the live frame)
+    detect_row = QHBoxLayout(); detect_row.setSpacing(8)
+    detect_btn = IconButton("자동 영역 검출", "crosshair", variant="primary")
+    detect_status = QLabel("")
+    reactive(detect_status, lambda: f"color:{T.palette.text_secondary};")
+
+    def _autodetect() -> None:
+        frame = state.get("frame")
+        if frame is None:
+            QMessageBox.information(main, "자동 검출",
+                "캡처가 활성화된 후 시도해주세요. (게임창 선택 + 마스터 시작)")
+            return
+        from quickcast.core.hud_detect import auto_detect_all
+        results = auto_detect_all(frame)
+        applied: list[str] = []
+        if "hp" in results:
+            g = results["hp"]
+            mock_settings.hp_text_cap.x, mock_settings.hp_text_cap.y = g.x, g.y
+            mock_settings.hp_text_cap_w = g.w; mock_settings.hp_text_cap_h = g.h
+            applied.append("HP")
+        if "mp" in results:
+            g = results["mp"]
+            mock_settings.mp_text_cap.x, mock_settings.mp_text_cap.y = g.x, g.y
+            mock_settings.mp_text_cap_w = g.w; mock_settings.mp_text_cap_h = g.h
+            applied.append("MP")
+        if "potion" in results:
+            g = results["potion"]
+            mock_settings.potion_text_cap.x, mock_settings.potion_text_cap.y = g.x, g.y
+            mock_settings.potion_text_cap_w = g.w; mock_settings.potion_text_cap_h = g.h
+            applied.append("물약")
+        if applied:
+            detect_status.setText(f"검출 적용: {', '.join(applied)} — 미세조정은 아래 박스 X/Y/W/H로")
+            bus.settings_dirty.emit()
+        else:
+            detect_status.setText("자동 검출 실패 — 아래 박스 X/Y/W/H를 수동 입력해주세요")
+    detect_btn.clicked.connect(_autodetect)
+    detect_row.addWidget(detect_btn); detect_row.addWidget(detect_status, 1)
+    ocr_card.add(detect_row)
+
+    # Per-region calibration block builder
+    def _ocr_region_row(
+        title: str,
+        get_x: Callable[[], int], set_x: Callable[[int], None],
+        get_y: Callable[[], int], set_y: Callable[[int], None],
+        get_w: Callable[[], int], set_w: Callable[[int], None],
+        get_h: Callable[[], int], set_h: Callable[[int], None],
+        suggested_truth: str,
+    ) -> QWidget:
+        """One row: [HP] X[..] Y[..] W[..] H[..]  [학습]."""
+        wrap = QWidget()
+        row = QHBoxLayout(wrap); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(10)
+
+        head = QLabel(title); head.setMinimumWidth(50)
+        f = QFont(); f.setBold(True); head.setFont(f)
+        reactive(head, lambda: f"color:{T.palette.text_primary};")
+        row.addWidget(head)
+
+        row.addWidget(_bind_axis("X", get_x, set_x, 1280))
+        row.addWidget(_bind_axis("Y", get_y, set_y, 720))
+        row.addWidget(_bind_axis("W", get_w, set_w, 1280))
+        row.addWidget(_bind_axis("H", get_h, set_h, 720))
+
+        train = IconButton("학습", "settings", variant="secondary", size="sm")
+        def _train() -> None:
+            frame = state.get("frame")
+            if frame is None:
+                QMessageBox.information(main, "OCR 학습",
+                    "캡처가 활성화된 후 시도해주세요. (게임창 선택 + 마스터 시작)")
+                return
+            w, h = get_w(), get_h()
+            if w <= 0 or h <= 0:
+                QMessageBox.information(main, "OCR 학습",
+                    "텍스트 영역(W/H)이 0입니다. 먼저 [자동 영역 검출]을 누르거나 W/H를 입력해주세요.")
+                return
+            x, y = get_x(), get_y()
+            try:
+                roi = frame[y : y + h, x : x + w]
+            except Exception:
+                roi = None
+            if roi is None or roi.size == 0:
+                QMessageBox.warning(main, "OCR 학습",
+                    "영역 잘라내기에 실패했습니다. X/Y/W/H가 화면 범위 내인지 확인해주세요.")
+                return
+            from quickcast.ui.components.ocr_calibration import OcrCalibrationDialog
+            dlg = OcrCalibrationDialog(np.ascontiguousarray(roi),
+                                          suggested_truth=suggested_truth,
+                                          parent=main)
+            if dlg.exec():
+                bus.settings_dirty.emit()
+                # Recognizer picks up the new templates from disk via
+                # the bus subscription wired in AppWindow.
+                try:
+                    bus.digit_templates_changed.emit()
+                except Exception:
+                    pass
+        train.clicked.connect(_train)
+        row.addWidget(train)
+        row.addStretch(1)
+        return wrap
+
+    ocr_card.add(_ocr_region_row(
+        "HP",
+        lambda: mock_settings.hp_text_cap.x, lambda v: setattr(mock_settings.hp_text_cap, "x", v),
+        lambda: mock_settings.hp_text_cap.y, lambda v: setattr(mock_settings.hp_text_cap, "y", v),
+        lambda: mock_settings.hp_text_cap_w, lambda v: setattr(mock_settings, "hp_text_cap_w", v),
+        lambda: mock_settings.hp_text_cap_h, lambda v: setattr(mock_settings, "hp_text_cap_h", v),
+        "",
+    ))
+    ocr_card.add(_ocr_region_row(
+        "MP",
+        lambda: mock_settings.mp_text_cap.x, lambda v: setattr(mock_settings.mp_text_cap, "x", v),
+        lambda: mock_settings.mp_text_cap.y, lambda v: setattr(mock_settings.mp_text_cap, "y", v),
+        lambda: mock_settings.mp_text_cap_w, lambda v: setattr(mock_settings, "mp_text_cap_w", v),
+        lambda: mock_settings.mp_text_cap_h, lambda v: setattr(mock_settings, "mp_text_cap_h", v),
+        "",
+    ))
+    ocr_card.add(_ocr_region_row(
+        "물약",
+        lambda: mock_settings.potion_text_cap.x, lambda v: setattr(mock_settings.potion_text_cap, "x", v),
+        lambda: mock_settings.potion_text_cap.y, lambda v: setattr(mock_settings.potion_text_cap, "y", v),
+        lambda: mock_settings.potion_text_cap_w, lambda v: setattr(mock_settings, "potion_text_cap_w", v),
+        lambda: mock_settings.potion_text_cap_h, lambda v: setattr(mock_settings, "potion_text_cap_h", v),
+        "",
+    ))
+
+    v.addWidget(ocr_card)
 
     v.addStretch(1)
     return sidebar, main

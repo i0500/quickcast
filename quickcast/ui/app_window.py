@@ -131,6 +131,8 @@ class AppWindow(AppShell):
         bus.settings_dirty.connect(self.save_debounced)
         # Capture target changed by user → hot-swap controller's capture source.
         bus.capture_target_changed.connect(self._hot_swap_capture)
+        # User saved new digit templates → make recognizer pick them up.
+        bus.digit_templates_changed.connect(self._on_digit_templates_changed)
         # Periodic safety save (every 30s, only if dirty since last save).
         self._dirty = False
         self._poll_timer = QTimer(self); self._poll_timer.setInterval(30_000)
@@ -656,6 +658,22 @@ class AppWindow(AppShell):
             f"단계 #{idx + 1} '{step.label}' 테스트 클릭 → ({step.x},{step.y})",
             level="success", duration_ms=2000,
         )
+
+    # ───────── OCR digit-templates reload ─────────
+    def _on_digit_templates_changed(self) -> None:
+        """User saved a new set of digit templates — make the live
+        recognizer pick them up without an app restart."""
+        if self.controller is None:
+            return
+        rec = getattr(self.controller, "recognizer", None)
+        if rec is not None and hasattr(rec, "reload_digits"):
+            try:
+                rec.reload_digits()
+                NotificationCenter.toast(
+                    "🔤 OCR 글자 학습 적용됨", level="success", duration_ms=1500,
+                )
+            except Exception:
+                logger.exception("recognizer.reload_digits failed")
 
     # ───────── auto game-window detection ─────────
     def _auto_find_game_window(self) -> None:

@@ -286,6 +286,22 @@ class Recognizer:
                 f" 물약: {'OK' if po_ok else 'FAIL'}"
             )
         self._last_score_log_at = 0.0
+        # Digit templates for the OCR path. Loaded lazily so a fresh
+        # install that hasn't trained yet doesn't pay the disk hit on
+        # every analyse() call. reload_digits() refreshes from disk
+        # whenever the learner saves a new set.
+        self._digit_templates: dict[str, np.ndarray] = {}
+        self.reload_digits()
+
+    def reload_digits(self) -> None:
+        """Re-read digit templates from disk. Safe to call repeatedly."""
+        try:
+            from quickcast.core.digit_store import load_templates
+            self._digit_templates = load_templates()
+        except Exception:
+            from quickcast.utils.logger import logger
+            logger.exception("digit templates reload failed")
+            self._digit_templates = {}
 
     @staticmethod
     def _load_bgra(path: Path) -> Optional[np.ndarray]:
@@ -344,6 +360,44 @@ class Recognizer:
         hp_roi = frame.crop(settings.hp_cap, settings.hp_cap_w, settings.hp_cap_h, sura_offset_hp)
         mp_roi = frame.crop(settings.mp_cap, settings.mp_cap_w, settings.mp_cap_h, sura_offset_mp)
 
+        # OCR path — only when explicitly enabled AND templates exist.
+        # Falls back to the legacy colour/template detectors when any
+        # piece is missing (no templates, no ROI, low confidence).
+        ocr_hp: Optional[int] = None
+        ocr_mp: Optional[int] = None
+        ocr_potion_empty: Optional[bool] = None
+        ocr_potion_score: float = 0.0
+        if getattr(settings, "ocr_mode", False) and self._digit_templates:
+            from quickcast.core.ocr import recognise, hp_percentage
+            # HP
+            if settings.hp_text_cap_w > 0 and settings.hp_text_cap_h > 0:
+                hp_text_roi = frame.crop(
+                    settings.hp_text_cap,
+                    settings.hp_text_cap_w, settings.hp_text_cap_h,
+                )
+                r = recognise(hp_text_roi, self._digit_templates)
+                ocr_hp = hp_percentage(r)
+            # MP
+            if settings.mp_text_cap_w > 0 and settings.mp_text_cap_h > 0:
+                mp_text_roi = frame.crop(
+                    settings.mp_text_cap,
+                    settings.mp_text_cap_w, settings.mp_text_cap_h,
+                )
+                r = recognise(mp_text_roi, self._digit_templates)
+                ocr_mp = hp_percentage(r)
+            # Potion — single-number field; 0 == empty.
+            if settings.potion_text_cap_w > 0 and settings.potion_text_cap_h > 0:
+                po_text_roi = frame.crop(
+                    settings.potion_text_cap,
+                    settings.potion_text_cap_w, settings.potion_text_cap_h,
+                )
+                r = recognise(po_text_roi, self._digit_templates)
+                if r.confidence >= 0.55 and r.current is not None:
+                    ocr_potion_empty = (r.current <= 0)
+                    # Map confidence to legacy 0..250_000 magnitude so
+                    # combat-panel sliders / dashboards keep working.
+                    ocr_potion_score = float(r.confidence) * 250_000.0
+
         # Per-kind scale matches the legacy threshold magnitudes so the
         # existing PK 1M-5M / Potion 50K-250K sliders still work. Skip
         # the matchTemplate entirely when the slot is OFF — the user's
@@ -378,13 +432,26 @@ class Recognizer:
         else:
             potion_score = 0.0
 
+        # Prefer OCR readings when valid (non-None, learnt templates
+        # produced a confident parse). Falls back to legacy detectors
+        # otherwise so a half-trained / partly-configured state still
+        # works exactly like before.
+        final_hp = ocr_hp if ocr_hp is not None else _hp_ratio(hp_roi)
+        final_mp = ocr_mp if ocr_mp is not None else _mp_ratio(mp_roi)
+        if ocr_potion_empty is not None:
+            final_potion_empty = bool(ocr_potion_empty)
+            final_potion_score = ocr_potion_score
+        else:
+            final_potion_empty = round(potion_score) >= settings.potion.threshold
+            final_potion_score = potion_score
+
         return FrameAnalysis(
-            hp=_hp_ratio(hp_roi),
-            mp=_mp_ratio(mp_roi),
+            hp=final_hp,
+            mp=final_mp,
             pk_detected=round(pk_score) >= settings.pk.threshold,
             pk_score=pk_score,
-            potion_empty=round(potion_score) >= settings.potion.threshold,
-            potion_score=potion_score,
+            potion_empty=final_potion_empty,
+            potion_score=final_potion_score,
             pk_match_xy=pk_match_xy,
             potion_match_xy=potion_match_xy,
             pk_match_scale=pk_match_scale,
