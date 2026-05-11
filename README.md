@@ -50,10 +50,6 @@ quickcast\build.bat
 - 본 프로젝트는 원작 동작을 참고하여 Python 네이티브로 재구현 및 기능 확장한 파생작
 - 별도 라이선스 미지정 — 사용/배포 전 원작자 의사 확인 권장
 
-## 후원
-
-이 프로젝트가 도움 되셨다면 ☕ [Buy Me a Coffee — snjdevs](https://buymeacoffee.com/snjdevs)
-
 ## 면책
 
 - 사용자는 게임사 EULA·이용약관·관련 법령을 준수할 책임이 있습니다
