@@ -1,0 +1,442 @@
+"""Main controller — capture thread + control thread.
+
+Mirrors the original `captureLoop` (every ~500 ms) and `controlLoop`
+(every ~100 ms) but each runs on its own thread so a slow Telegram
+upload or template match never starves the other.
+"""
+from __future__ import annotations
+
+import threading
+import time
+from typing import Callable, Optional
+
+from quickcast.config import Settings
+from quickcast.core.capture import Frame, ScreenCapture
+from quickcast.core.recognition import FrameAnalysis, Recognizer
+from quickcast.core.state import RuntimeState
+from quickcast.input_io.input_router import InputBackend, NullBackend
+from quickcast.notify.telegram import TelegramNotifier
+from quickcast.slots.slot_manager import FireEvent, SlotManager
+from quickcast.utils.logger import logger
+
+
+# Public callback signature: receives latest analysis for UI display.
+AnalysisCallback = Callable[[FrameAnalysis, Frame], None]
+
+
+class MacroController:
+    """Owns the capture/control threads and ties the modules together."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        capture: ScreenCapture,
+        recognizer: Recognizer,
+        slot_manager: SlotManager,
+        input_backend: InputBackend,
+        telegram: Optional[TelegramNotifier] = None,
+        on_analysis: Optional[AnalysisCallback] = None,
+        on_slot_state_changed: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.settings = settings
+        self.capture = capture
+        self.recognizer = recognizer
+        self.slot_manager = slot_manager
+        self.input = input_backend or NullBackend()
+        self.telegram = telegram
+        self.on_analysis = on_analysis
+        # Fired (no args) whenever a one-shot toggle (pk.use, potion.use,
+        # slot.use for non-repeat) is auto-disabled by SlotManager so the
+        # UI can refresh its iOS toggles to match.
+        self.on_slot_state_changed = on_slot_state_changed
+        self.state = RuntimeState()
+
+        self._stop = threading.Event()
+        self._capture_thread: Optional[threading.Thread] = None
+        self._control_thread: Optional[threading.Thread] = None
+
+        # Most-recent frame + analysis shared between threads
+        self._latest_lock = threading.Lock()
+        self._latest_frame: Optional[Frame] = None
+        self._latest_analysis: Optional[FrameAnalysis] = None
+
+    # ───────── lifecycle ─────────
+    def start(self) -> None:
+        if self._capture_thread and self._capture_thread.is_alive():
+            return
+        self._stop.clear()
+        self.state.capture_connected = True
+
+        self._capture_thread = threading.Thread(
+            target=self._capture_loop, name="CaptureLoop", daemon=True
+        )
+        self._control_thread = threading.Thread(
+            target=self._control_loop, name="ControlLoop", daemon=True
+        )
+        self._capture_thread.start()
+        self._control_thread.start()
+        logger.debug("MacroController started")
+
+    def stop(self) -> None:
+        self._stop.set()
+        for t in (self._capture_thread, self._control_thread):
+            if t:
+                t.join(timeout=2.0)
+        self._capture_thread = self._control_thread = None
+        self.state.capture_connected = False
+        logger.debug("MacroController stopped")
+
+    def set_master_switch(self, on: bool) -> None:
+        self.settings.master_switch = on
+        if on:
+            self.state.recovery_stop.clear()
+            try:
+                self.slot_manager.cooldown.reset()
+            except Exception:
+                pass
+            # Clear recovery edge-trigger latches so a fresh master
+            # cycle starts with all triggers eligible again.
+            self.state.recovery_handled.clear()
+            self.state._last_recovery_at = 0.0
+            self.state.begin_master_grace(3.0)
+            logger.info("🟢 마스터 ON  (3초 후 가동, 모든 쿨타임 초기화)")
+        else:
+            self.state.end_master_grace()
+            if self.state.recovery_in_progress:
+                self.state.recovery_stop.set()
+            self.state._last_recovery_at = 0.0
+            logger.info("🔴 마스터 OFF")
+
+    # ───────── capture thread ─────────
+    def _capture_loop(self) -> None:
+        # Cap at the user's chosen fps (max 30). PrintWindow naturally
+        # throttles to ~30 fps anyway, and beyond that the OS-level
+        # render becomes the bottleneck — pushing higher just wastes
+        # CPU on low-end hardware without gaining responsiveness.
+        target_period = 1.0 / max(1, min(30, int(self.settings.capture_fps)))
+        next_tick = time.monotonic()
+        # Track last error message so a flapping minimise/restore doesn't
+        # spam the log with one identical line per tick.
+        last_err_key = ""
+        while not self._stop.is_set():
+            try:
+                frame = self.capture.grab()
+                analysis = self.recognizer.analyze(frame, self.settings)
+                with self._latest_lock:
+                    self._latest_frame = frame
+                    self._latest_analysis = analysis
+                self.state.update_analysis(analysis)
+                if self.on_analysis:
+                    try:
+                        self.on_analysis(analysis, frame)
+                    except Exception as e:
+                        logger.warning(f"on_analysis callback error: {e}")
+                if last_err_key:
+                    logger.info("✅ 캡처 정상화")
+                    last_err_key = ""
+            except Exception as e:
+                # Lazy import to avoid module-load cycle.
+                try:
+                    from quickcast.core.window_print_capture import WindowMinimizedError
+                except Exception:
+                    WindowMinimizedError = None
+                if WindowMinimizedError is not None and isinstance(e, WindowMinimizedError):
+                    key = "minimized"
+                    if last_err_key != key:
+                        logger.info("ℹ️ 게임창 최소화 — 마지막 프레임 유지")
+                        last_err_key = key
+                else:
+                    msg = str(e)
+                    if last_err_key != msg:
+                        logger.error(f"❌ 캡처 오류: {msg}")
+                        last_err_key = msg
+                time.sleep(0.5)
+
+            # Steady cadence; falls back gracefully if a frame took too long
+            next_tick += target_period
+            sleep_for = next_tick - time.monotonic()
+            if sleep_for > 0:
+                self._stop.wait(sleep_for)
+            else:
+                next_tick = time.monotonic()
+
+    # ───────── control thread ─────────
+    def _control_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._tick_control()
+            except Exception as e:
+                logger.error(f"❌ 제어 루프 오류: {e}")
+            self._stop.wait(0.1)  # ~100 ms cadence, matches JS
+
+    def _tick_control(self) -> None:
+        if not self.settings.master_switch:
+            return
+        if self.state.in_grace_period():
+            return
+        if getattr(self.state, "recovery_in_progress", False):
+            return
+        # Auto-pause while the game window is minimised — its rendered
+        # frame is stale so reactions to it would be wrong. Edge-log
+        # the transition once in each direction.
+        hwnd = int(getattr(self, "_auto_hwnd", 0) or 0)
+        if hwnd:
+            try:
+                import ctypes
+                is_min = bool(ctypes.windll.user32.IsIconic(hwnd))
+            except Exception:
+                is_min = False
+            if is_min != self.state.window_minimized:
+                was_min = self.state.window_minimized
+                self.state.window_minimized = is_min
+                if is_min:
+                    logger.info("⏸️ 게임창 최소화 감지 — 매크로 일시정지")
+                else:
+                    # Restore — give the capture loop a 1-second grace
+                    # to grab a FRESH (non-black) frame before we trust
+                    # `_latest_analysis` again. Without this, the stale
+                    # black-frame HP=0 reading would fire heal slots
+                    # the moment IsIconic flips False. Also wipe the
+                    # stale analysis so even if grace check is bypassed
+                    # somehow, the eval has no data to act on.
+                    self.state.begin_master_grace(1.0)
+                    with self._latest_lock:
+                        self._latest_analysis = None
+                    logger.info("▶️ 게임창 복구 — 매크로 재개 (1초 안정화 대기)")
+                # Either direction — return so this tick doesn't fall
+                # through to slot evaluation with potentially stale data.
+                return
+            if is_min:
+                return
+
+        with self._latest_lock:
+            analysis = self._latest_analysis
+            frame = self._latest_frame
+        if analysis is None:
+            return
+
+        # Snapshot use-state so we can detect SlotManager auto-disabling
+        # any one-shot toggle this tick (potion fires, non-repeat slots
+        # / pk firing) and notify the UI to refresh its toggles.
+        s = self.settings
+        prev = (s.pk.use, s.potion.use,
+                {sid: sl.use for sid, sl in s.slots.items()})
+
+        # Fire any matching slot events first.
+        events = self.slot_manager.evaluate(self.settings, analysis)
+        fired_ids: list[str] = []
+        for event in events:
+            self._fire(event, frame)
+            fired_ids.append(event.slot_id)
+
+        if events:
+            # Compare snapshot to detect any toggle that flipped True→False.
+            cur_slots = {sid: sl.use for sid, sl in s.slots.items()}
+            if (prev[0] != s.pk.use or prev[1] != s.potion.use
+                    or any(prev[2].get(k) != cur_slots.get(k) for k in cur_slots)):
+                if self.on_slot_state_changed:
+                    try:
+                        self.on_slot_state_changed()
+                    except Exception:
+                        logger.exception("on_slot_state_changed callback failed")
+
+        # Recovery sequence trigger detection — uses the same `analysis`
+        # and the list of slots that just fired this tick.
+        self._maybe_trigger_recovery(analysis, fired_ids)
+
+    def _maybe_trigger_recovery(self, analysis: FrameAnalysis,
+                                  fired_slot_ids: Optional[list] = None) -> None:
+        rec = getattr(self.settings, "recovery", None)
+        if rec is None or not rec.enabled or not rec.steps:
+            return
+        # Edge-triggered latch — the recovery_handled set tracks which
+        # triggers already fired recovery and are still asserted. We
+        # clear an entry the moment its source condition goes False,
+        # forcing the user (or the game) to re-arm the trigger before
+        # we run the sequence again.
+        handled = self.state.recovery_handled
+        # ── Latch release: based on the LEVEL state of the source
+        # condition (potion_empty / pk_detected / hp<=1). When the
+        # game's empty-potion icon disappears, "potion" releases and
+        # can re-fire next time it shows up.
+        level_active: set = set()
+        if analysis.potion_empty:    level_active.add("potion")
+        if analysis.pk_detected:     level_active.add("pk")
+        if analysis.hp <= 1:         level_active.add("hp_zero")
+        for h in list(handled):
+            if h.startswith("slot:"):
+                continue
+            if h not in level_active:
+                handled.discard(h)
+
+        # ── Fire decision: PK / Potion recovery only fires when the
+        # corresponding slot actually fired this tick. So if the user's
+        # potion slot is OFF / out of HP range / didn't trigger, the
+        # recovery doesn't fire either — they stay perfectly in lockstep.
+        fired = set(fired_slot_ids or [])
+        fire_set: set = set()
+        if rec.trigger_potion and "potion" in fired:
+            fire_set.add("potion")
+        if rec.trigger_pk and "pk" in fired:
+            fire_set.add("pk")
+        if rec.trigger_hp_zero and analysis.hp <= 1:
+            fire_set.add("hp_zero")
+
+        # No global cooldown — edge-trigger latch already prevents
+        # the recovery loop. Each trigger fires once until its
+        # condition releases (or potion.use is re-toggled).
+
+        # Decide what to fire — first un-handled active trigger wins.
+        triggered_by = ""
+        for k in ("potion", "pk", "hp_zero"):
+            if k in fire_set and k not in handled:
+                triggered_by = k
+                break
+        slot_triggered = False
+        if not triggered_by and fired_slot_ids and getattr(rec, "trigger_slot_ids", None):
+            for sid in fired_slot_ids:
+                if sid in rec.trigger_slot_ids:
+                    triggered_by = f"slot:{sid}"
+                    slot_triggered = True
+                    break
+        if not triggered_by:
+            return
+        # Only level-source triggers (potion/pk/hp_zero) get latched.
+        # Slot triggers are inherently edge events so they're free to
+        # re-fire on each fresh slot fire without latching.
+        if not slot_triggered:
+            handled.add(triggered_by)
+        # Need a known game HWND for the click coords to mean anything.
+        hwnd = int(getattr(self, "_auto_hwnd", 0) or 0)
+        if not hwnd:
+            logger.warning("⚠️ 사냥터 복귀 트리거됐지만 게임창 미선택")
+            return
+
+        self.state._last_recovery_at = time.monotonic()
+        self.state.recovery_in_progress = True
+        frame_size = None
+        with self._latest_lock:
+            if self._latest_frame is not None:
+                h, w = self._latest_frame.image.shape[:2]
+                frame_size = (int(w), int(h))
+        logger.info(
+            f"🏃 사냥터 복귀 시작 ({triggered_by})  "
+            f"{rec.start_delay_seconds}초 대기 → {len(rec.steps)}단계 실행"
+        )
+        threading.Thread(
+            target=self._run_recovery_thread,
+            args=(hwnd, rec.start_delay_seconds, list(rec.steps), frame_size),
+            name="RecoveryRunner", daemon=True,
+        ).start()
+
+    def _run_recovery_thread(self, hwnd: int, start_delay_s: int, steps: list,
+                              frame_size: Optional[tuple] = None) -> None:
+        from quickcast.input_io.win32_input import click_at, attach_input_scope
+
+        def _aborted() -> bool:
+            return (self._stop.is_set()
+                    or self.state.recovery_stop.is_set()
+                    or not self.settings.master_switch)
+
+        def _wait(seconds: float) -> bool:
+            """Wait `seconds`, returning True if we were aborted mid-sleep.
+            Polls master/abort every 100ms so master OFF stops promptly
+            even during the long start_delay_seconds window."""
+            deadline = time.monotonic() + max(0.0, seconds)
+            while time.monotonic() < deadline:
+                if _aborted():
+                    return True
+                self._stop.wait(min(0.1, deadline - time.monotonic()))
+            return _aborted()
+
+        try:
+            if _wait(float(start_delay_s)):
+                logger.info("🏃 사냥터 복귀 중단됨 (시작 대기 중)")
+                return
+            with attach_input_scope(hwnd):
+                for i, step in enumerate(steps, 1):
+                    if _aborted():
+                        logger.info(f"🏃 사냥터 복귀 중단됨 (단계 {i} 직전)")
+                        return
+                    if step.key:
+                        # Key-press step — route through the configured
+                        # input backend (Arduino / PostMessage / etc).
+                        logger.info(
+                            f"🏃 단계 {i}/{len(steps)} {step.label} → 키 '{step.key}'"
+                        )
+                        try:
+                            self.input.send_key(step.key)
+                        except Exception:
+                            logger.exception("recovery: key send failed")
+                    else:
+                        logger.info(
+                            f"🏃 단계 {i}/{len(steps)} {step.label} → 클릭 ({step.x},{step.y})"
+                        )
+                        click_at(hwnd, int(step.x), int(step.y),
+                                  frame_size=frame_size, method="postmessage")
+                    if _wait(step.delay_after_ms / 1000.0):
+                        logger.info(f"🏃 사냥터 복귀 중단됨 (단계 {i} 후)")
+                        return
+            logger.success("✅ 사냥터 복귀 완료")
+        except Exception:
+            logger.exception("❌ 사냥터 복귀 시퀀스 오류")
+        finally:
+            self.state.recovery_in_progress = False
+
+    def _fire(self, event: FireEvent, frame: Optional[Frame]) -> None:
+        backend = self.input
+        backend_name = type(backend).__name__
+        backend_ok = bool(getattr(backend, "connected", True))
+        if not backend_ok:
+            # Silent fallback to a connected sibling — keep this clean.
+            backends = getattr(self, "_backends", {}) or {}
+            fallback = None
+            for name in ("postmessage", "attachinput", "arduino"):
+                cand = backends.get(name)
+                if cand is None or cand is backend:
+                    continue
+                if bool(getattr(cand, "connected", False)):
+                    fallback = (name, cand)
+                    break
+            if fallback is not None:
+                logger.warning(
+                    f"⚠️ {backend_name} 미연결 — {fallback[0]}으로 폴백"
+                )
+                backend = fallback[1]
+                backend_name = type(backend).__name__
+            else:
+                logger.warning(
+                    f"⚠️ {event.label} 발사 실패: 사용 가능한 백엔드 없음"
+                )
+
+        # Hardware first; notification is best-effort and async
+        try:
+            if event.count <= 1:
+                backend.send_key(event.key)
+            else:
+                self._send_burst_via(backend, event.key, event.count, event.delay)
+        except Exception:
+            logger.exception(f"_fire: send via {backend_name} failed")
+
+        if event.tele_use and self.telegram and self.telegram.connected:
+            if event.snapshot and frame is not None:
+                self.telegram.send_photo(frame.image, caption=f"{event.label} 실행")
+            else:
+                self.telegram.send_text(f"{event.label} 기능을 사용했습니다")
+
+    def _send_burst(self, key: str, count: int, delay: float) -> None:
+        self._send_burst_via(self.input, key, count, delay)
+
+    def _send_burst_via(self, backend, key: str, count: int, delay: float) -> None:
+        # Use the backend's burst API if available (Arduino), else loop
+        burst = getattr(backend, "send_sequence", None)
+        if callable(burst):
+            burst(key, count, delay)
+        else:
+            for i in range(count):
+                backend.send_key(key)
+                if i < count - 1 and delay > 0:
+                    time.sleep(delay)
+
+
+__all__ = ["MacroController", "AnalysisCallback"]
