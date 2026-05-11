@@ -34,9 +34,23 @@ class Frame:
     image: np.ndarray  # (720, 1280, 4) uint8 BGRA
 
     def crop(self, point: Point, w: int, h: int, y_offset: int = 0) -> np.ndarray:
-        """Return a contiguous BGRA slice (caller owns the view-or-copy)."""
-        y = point.y + y_offset
-        return self.image[y : y + h, point.x : point.x + w].copy()
+        """Return a contiguous BGRA slice, clamped to the frame bounds.
+
+        Negative / out-of-range ROI coords (e.g. after a stale
+        aspect-profile load before the user re-calibrates) used to
+        return an empty array via Python negative indexing — which then
+        looked like the ROI had "vanished" downstream. We clamp to
+        keep at least an in-bounds rectangle whenever any of it
+        overlaps the frame; if the ROI is fully outside the frame we
+        return an empty (0, 0, 4) slice so callers can still operate
+        without crashing.
+        """
+        fh, fw = self.image.shape[:2]
+        x0 = max(0, min(int(point.x), fw))
+        y0 = max(0, min(int(point.y + y_offset), fh))
+        x1 = max(x0, min(int(point.x) + int(w), fw))
+        y1 = max(y0, min(int(point.y + y_offset) + int(h), fh))
+        return self.image[y0:y1, x0:x1].copy()
 
 
 class CaptureSource(Protocol):

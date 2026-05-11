@@ -339,16 +339,16 @@ class Settings(BaseModel):
     def _scale_profile_y(p: RoiProfile, scale: float) -> RoiProfile:
         """Scale a profile's vertical coords/heights by `scale`.
 
-        Used when seeding a never-seen aspect bucket from the previous
-        one: assumes the captured client area has equal *width* in both
-        ratios (typical for fullscreen / maximised game windows) and
-        that HUD elements are anchored near the top edge, so the
-        normalised-to-1280×720 y value scales as ``aspect_new/aspect_old``
-        (≡ ``h_old/h_new``). X coordinates pass through unchanged.
+        Only HP / MP are rescaled — they're top-anchored thin bars where
+        the proportional remap gets the user 99% of the way there.
 
-        PK / Potion box widths/heights are pinned to the embedded
-        template image dimensions by the recognizer, so we leave their
-        sizes untouched and scale only their (x, y) anchor.
+        PK / POTION are SEARCH REGIONS now (the matcher locates the
+        small icon inside the user's generously-sized box). Rescaling
+        them on aspect change would just drift the box off the icon and
+        shrink/expand the search area for no benefit — worse, a large
+        user-drawn box can be pushed off-screen or to a tiny size. So
+        we copy them through unchanged and let the matcher relocate
+        the icon within the same box.
         """
         def sy(v: int) -> int:
             return max(0, int(round(v * scale)))
@@ -361,9 +361,10 @@ class Settings(BaseModel):
             hp_cap_w=p.hp_cap_w, hp_cap_h=sh(p.hp_cap_h),
             mp_cap=Point(x=p.mp_cap.x, y=sy(p.mp_cap.y)),
             mp_cap_w=p.mp_cap_w, mp_cap_h=sh(p.mp_cap_h),
-            pk_cap=Point(x=p.pk_cap.x, y=sy(p.pk_cap.y)),
+            # PK / POTION pass through unchanged — see docstring above.
+            pk_cap=Point(x=p.pk_cap.x, y=p.pk_cap.y),
             pk_cap_w=p.pk_cap_w, pk_cap_h=p.pk_cap_h,
-            potion_cap=Point(x=p.potion_cap.x, y=sy(p.potion_cap.y)),
+            potion_cap=Point(x=p.potion_cap.x, y=p.potion_cap.y),
             potion_cap_w=p.potion_cap_w, potion_cap_h=p.potion_cap_h,
         )
 
