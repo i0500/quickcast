@@ -29,6 +29,17 @@ class FrameAnalysis:
     pk_score: float
     potion_empty: bool
     potion_score: float
+    # Best-match top-left within the ROI search region, in frame coords
+    # (1280×720 normalised space). (-1, -1) when no scan was performed
+    # (slot OFF or template missing). Used by the preview overlay to show
+    # the user where the template actually locked on.
+    pk_match_xy: tuple[int, int] = (-1, -1)
+    potion_match_xy: tuple[int, int] = (-1, -1)
+    # Effective scale that produced the best score (1.0 = native template
+    # size). Useful for diagnostics — if the best fit is consistently
+    # ≠ 1.0 the user's calibration is at the wrong zoom level.
+    pk_match_scale: float = 1.0
+    potion_match_scale: float = 1.0
 
 
 def _hp_ratio(roi_bgra: np.ndarray) -> int:
@@ -167,31 +178,92 @@ _TS_DIAG = {"last": 0.0}    # throttled raw-score logger
 _ROI_FIX_REPORTED: dict[str, bool] = {}    # log ROI auto-fix once per kind
 
 
+# Multi-scale candidates around 1.0× — covers the small zoom variation
+# that comes from non-uniform stretching (16:9 → 16:10 normalisation,
+# user-resized window, etc.). 5 scales × ~30µs each = under 1ms total
+# for the 13×13 potion template, ~4ms for the 25×25 pk template.
+_SCALE_CANDIDATES: tuple[float, ...] = (0.85, 0.93, 1.00, 1.08, 1.18)
+
+
+def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
+                       *, scale_legacy: float = 1_000_000.0,
+                       _kind: str = "") -> tuple[float, tuple[int, int], float]:
+    """Find the best template match inside `roi_bgra`.
+
+    Returns ``(legacy_score, (best_x, best_y), best_scale)``:
+      - ``legacy_score`` is the normalised correlation (0..1) rescaled to
+        the legacy threshold magnitude so existing sliders still calibrate
+        the same way.
+      - ``(best_x, best_y)`` is the top-left of the best match **relative
+        to the ROI** (caller adds ROI origin to map to frame coords).
+        Set to ``(-1, -1)`` on failure / unmatchable input.
+      - ``best_scale`` is the template scale factor that gave the best
+        score (1.0 = native template size). Useful for diagnostics.
+
+    Tries multiple template scales around 1.0× so a HUD that shrunk /
+    grew slightly under a different client size still locks on. The ROI
+    must be at least as large as the *largest* scaled template; smaller
+    scales are skipped silently if the ROI can't fit them.
+    """
+    from quickcast.utils.logger import logger
+    if roi_bgra is None or target_bgra is None:
+        return 0.0, (-1, -1), 1.0
+    if roi_bgra.size == 0 or target_bgra.size == 0:
+        return 0.0, (-1, -1), 1.0
+
+    th_native, tw_native = target_bgra.shape[:2]
+    rh, rw = roi_bgra.shape[:2]
+
+    # ROI too small even for the smallest scale → cannot match. Reported
+    # at DEBUG only (the recognizer enforces a minimum size before
+    # calling us in the steady-state path).
+    smallest = max(1, int(round(tw_native * _SCALE_CANDIDATES[0])))
+    smallest_h = max(1, int(round(th_native * _SCALE_CANDIDATES[0])))
+    if rw < smallest or rh < smallest_h:
+        logger.debug(
+            f"_template_search[{_kind}]: ROI {rw}x{rh} < smallest "
+            f"scaled template {smallest}x{smallest_h}"
+        )
+        return 0.0, (-1, -1), 1.0
+
+    best_score = -1.0
+    best_xy = (-1, -1)
+    best_scale = 1.0
+    for s in _SCALE_CANDIDATES:
+        sw = max(1, int(round(tw_native * s)))
+        sh = max(1, int(round(th_native * s)))
+        if sw > rw or sh > rh:
+            continue
+        if sw == tw_native and sh == th_native:
+            tmpl = target_bgra
+        else:
+            # INTER_AREA for shrink, INTER_LINEAR for upscale — gives the
+            # cleanest result for the small UI icons we're matching.
+            interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR
+            tmpl = cv2.resize(target_bgra, (sw, sh), interpolation=interp)
+        try:
+            result = cv2.matchTemplate(roi_bgra, tmpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        except cv2.error as exc:
+            logger.error(f"❌ 인식 실패 [{_kind} @ {s:.2f}×]: {exc}")
+            continue
+        if max_val > best_score:
+            best_score = float(max_val)
+            best_xy = (int(max_loc[0]), int(max_loc[1]))
+            best_scale = s
+
+    if best_score < 0:
+        return 0.0, (-1, -1), 1.0
+    return max(0.0, best_score * scale_legacy), best_xy, best_scale
+
+
 def _template_score(roi_bgra: np.ndarray, target_bgra: np.ndarray,
                      scale: float = 1_000_000.0,
                      _kind: str = "") -> float:
-    """Normalised correlation, rescaled to legacy threshold magnitudes."""
-    from quickcast.utils.logger import logger
-    import time as _t
-    if roi_bgra is None or target_bgra is None:
-        return 0.0
-    if roi_bgra.size == 0 or target_bgra.size == 0:
-        return 0.0
-    if roi_bgra.shape[0] < target_bgra.shape[0] or roi_bgra.shape[1] < target_bgra.shape[1]:
-        # Should never happen now (recogniser auto-fixes ROI dims to
-        # match template). Logged at DEBUG only.
-        logger.debug(
-            f"_template_score[{_kind}]: ROI {roi_bgra.shape[1]}x{roi_bgra.shape[0]} "
-            f"< template {target_bgra.shape[1]}x{target_bgra.shape[0]}"
-        )
-        return 0.0
-    try:
-        result = cv2.matchTemplate(roi_bgra, target_bgra, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, _ = cv2.minMaxLoc(result)
-    except cv2.error as exc:
-        logger.error(f"❌ 인식 실패 [{_kind}]: {exc}")
-        return 0.0
-    return max(0.0, float(max_val) * scale)
+    """Backwards-compat shim: returns just the legacy score."""
+    s, _, _ = _template_search(roi_bgra, target_bgra,
+                                  scale_legacy=scale, _kind=_kind)
+    return s
 
 
 class Recognizer:
@@ -238,23 +310,36 @@ class Recognizer:
         sura_offset_hp = 5 if settings.sura_mode else 0
         sura_offset_mp = 6 if settings.sura_mode else 0
 
-        # Auto-correct ROI dims to template size (only logged once
-        # per process via _ROI_FIX_REPORTED, to avoid log noise).
+        # Auto-correct ROI dims ONLY when smaller than template. The ROI
+        # is now a *search region* — users keep it bigger than the
+        # template on purpose so the matcher can hunt for the icon's
+        # exact position. Shrinking the ROI to the template size would
+        # defeat the whole "set once, auto-track" design.
         from quickcast.utils.logger import logger
         if self._pk_target is not None:
             th, tw = self._pk_target.shape[:2]
-            if settings.pk.cap_w != tw or settings.pk.cap_h != th:
+            if settings.pk.cap_w < tw or settings.pk.cap_h < th:
                 if not _ROI_FIX_REPORTED.get("pk"):
-                    logger.info(f"🔧 PK 박스 크기 자동 보정: {settings.pk.cap_w}×{settings.pk.cap_h} → {tw}×{th}")
+                    logger.info(
+                        f"🔧 PK 박스가 템플릿보다 작아 최소 크기로 확장: "
+                        f"{settings.pk.cap_w}×{settings.pk.cap_h} → "
+                        f"{max(settings.pk.cap_w, tw)}×{max(settings.pk.cap_h, th)}"
+                    )
                     _ROI_FIX_REPORTED["pk"] = True
-                settings.pk.cap_w = int(tw); settings.pk.cap_h = int(th)
+                settings.pk.cap_w = max(int(settings.pk.cap_w), int(tw))
+                settings.pk.cap_h = max(int(settings.pk.cap_h), int(th))
         if self._potion_target is not None:
             th, tw = self._potion_target.shape[:2]
-            if settings.potion.cap_w != tw or settings.potion.cap_h != th:
+            if settings.potion.cap_w < tw or settings.potion.cap_h < th:
                 if not _ROI_FIX_REPORTED.get("potion"):
-                    logger.info(f"🔧 물약 박스 크기 자동 보정: {settings.potion.cap_w}×{settings.potion.cap_h} → {tw}×{th}")
+                    logger.info(
+                        f"🔧 물약 박스가 템플릿보다 작아 최소 크기로 확장: "
+                        f"{settings.potion.cap_w}×{settings.potion.cap_h} → "
+                        f"{max(settings.potion.cap_w, tw)}×{max(settings.potion.cap_h, th)}"
+                    )
                     _ROI_FIX_REPORTED["potion"] = True
-                settings.potion.cap_w = int(tw); settings.potion.cap_h = int(th)
+                settings.potion.cap_w = max(int(settings.potion.cap_w), int(tw))
+                settings.potion.cap_h = max(int(settings.potion.cap_h), int(th))
 
         hp_roi = frame.crop(settings.hp_cap, settings.hp_cap_w, settings.hp_cap_h, sura_offset_hp)
         mp_roi = frame.crop(settings.mp_cap, settings.mp_cap_w, settings.mp_cap_h, sura_offset_mp)
@@ -265,17 +350,31 @@ class Recognizer:
         # intuition (off switch ⇒ no work) wins over keeping a live
         # calibration score, which the combat panel labels handle by
         # showing "감지 OFF" instead.
+        pk_match_xy: tuple[int, int] = (-1, -1)
+        pk_match_scale = 1.0
         if settings.pk.use and self._pk_target is not None:
             pk_roi = frame.crop(settings.pk.cap, settings.pk.cap_w, settings.pk.cap_h)
-            pk_score = _template_score(pk_roi, self._pk_target,
-                                         scale=5_000_000.0, _kind="pk")
+            pk_score, local_xy, pk_match_scale = _template_search(
+                pk_roi, self._pk_target,
+                scale_legacy=5_000_000.0, _kind="pk",
+            )
+            if local_xy != (-1, -1):
+                pk_match_xy = (settings.pk.cap.x + local_xy[0],
+                               settings.pk.cap.y + local_xy[1])
         else:
             pk_score = 0.0
 
+        potion_match_xy: tuple[int, int] = (-1, -1)
+        potion_match_scale = 1.0
         if settings.potion.use and self._potion_target is not None:
             potion_roi = frame.crop(settings.potion.cap, settings.potion.cap_w, settings.potion.cap_h)
-            potion_score = _template_score(potion_roi, self._potion_target,
-                                             scale=250_000.0, _kind="potion")
+            potion_score, local_xy, potion_match_scale = _template_search(
+                potion_roi, self._potion_target,
+                scale_legacy=250_000.0, _kind="potion",
+            )
+            if local_xy != (-1, -1):
+                potion_match_xy = (settings.potion.cap.x + local_xy[0],
+                                    settings.potion.cap.y + local_xy[1])
         else:
             potion_score = 0.0
 
@@ -286,6 +385,10 @@ class Recognizer:
             pk_score=pk_score,
             potion_empty=round(potion_score) >= settings.potion.threshold,
             potion_score=potion_score,
+            pk_match_xy=pk_match_xy,
+            potion_match_xy=potion_match_xy,
+            pk_match_scale=pk_match_scale,
+            potion_match_scale=potion_match_scale,
         )
 
 

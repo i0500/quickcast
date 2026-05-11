@@ -222,11 +222,10 @@ class InteractivePreview(QWidget):
         return QPoint(fx, fy)
 
     # ───────── hit testing ─────────
-    # PK / Potion ROI sizes are pinned to the embedded template image's
-    # dimensions, so allowing the user to resize the box would always
-    # mismatch the template. Lock them to MOVE-only — corners and edges
-    # don't return resize handles for these IDs.
-    _SIZE_LOCKED_IDS = ("pk", "potion")
+    # PK / Potion ROI are search regions now (matchTemplate runs inside
+    # them and locks onto the icon's exact position automatically), so
+    # all four ROI sizes are user-resizable. Empty tuple = nothing locked.
+    _SIZE_LOCKED_IDS: tuple[str, ...] = ()
 
     def _hit_test(self, fx: int, fy: int) -> tuple[Optional[str], int]:
         """Return (roi_id, hit_zone) for the topmost matching ROI under (fx, fy)."""
