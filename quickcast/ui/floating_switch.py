@@ -158,7 +158,12 @@ class FloatingSwitch(QWidget):
         if self._dragging:
             return
         if not is_window_alive(self._target_hwnd):
-            self.detach()
+            # Window died (game closed / restarted). Don't detach() —
+            # that stops the tracker and forgets we're supposed to be
+            # ON. Just hide and keep polling so the AppWindow auto-find
+            # signal (game_window_found) can re-attach us seamlessly.
+            self._target_hwnd = None
+            self.hide()
             return
         rect = get_client_rect_screen(self._target_hwnd) or get_window_rect(self._target_hwnd)
         if rect is None:

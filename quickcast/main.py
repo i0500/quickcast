@@ -321,6 +321,27 @@ def run() -> None:
             window.title_bar.floater_toggle.set_state(True, animate=False)
         except Exception:
             logger.exception("floater auto-attach failed")
+
+    # Re-attach the floater whenever the system rebinds to a new game
+    # window — either through the user's manual Capture-section pick
+    # OR the periodic auto-detection in AppWindow. Without this the
+    # floater would silently keep tracking the dead HWND from before
+    # the game restart / window swap.
+    from quickcast.ui.design.signals import bus as _gw_bus
+    def _on_game_window_found(hwnd: int, _title: str) -> None:
+        if not settings.floater_enabled:
+            return
+        try:
+            floater.attach_to(int(hwnd))
+        except Exception:
+            logger.exception("floater re-attach failed")
+        # Keep the title-bar toggle in sync (in case this is the
+        # first window we've ever seen this session).
+        try:
+            window.title_bar.floater_toggle.set_state(True, animate=False)
+        except Exception:
+            pass
+    _gw_bus.game_window_found.connect(_on_game_window_found)
     # Persist the floater state when the user toggles it via title bar.
     def _on_floater_state_change(on: bool) -> None:
         if settings.floater_enabled != on:

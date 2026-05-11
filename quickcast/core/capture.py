@@ -60,6 +60,10 @@ class _MssBase:
             np.empty((TARGET_H, TARGET_W, 4), dtype=np.uint8) for _ in range(3)
         ]
         self._pool_idx: int = 0
+        # Width/height of the most recent SOURCE grab (pre-resize). Used
+        # by the controller to detect aspect-ratio changes so it can
+        # swap to the matching ROI profile.
+        self.last_source_size: tuple[int, int] = (0, 0)
 
     def _sct(self) -> mss.base.MSSBase:
         sct = getattr(self._tls, "sct", None)
@@ -104,6 +108,7 @@ class MonitorCapture(_MssBase):
     def grab(self) -> Frame:
         sct = self._sct()
         raw = np.asarray(sct.grab(sct.monitors[self.monitor_index]))
+        self.last_source_size = (int(raw.shape[1]), int(raw.shape[0]))
         return self._to_target_frame(raw)
 
 
@@ -146,6 +151,7 @@ class WindowCapture(_MssBase):
         region = {"left": rect.left, "top": rect.top,
                   "width": rect.width, "height": rect.height}
         raw = np.asarray(sct.grab(region))
+        self.last_source_size = (int(rect.width), int(rect.height))
         return self._to_target_frame(raw)
 
 

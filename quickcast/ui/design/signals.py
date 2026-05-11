@@ -22,6 +22,17 @@ class _SignalBus(QObject):
     # User picked a different game window via Capture section. AppWindow
     # listens and hot-swaps the controller's capture source.
     capture_target_changed = Signal()
+    # Capture source aspect-ratio bucket changed (e.g. "16:9" → "16:10"
+    # when the game window goes fullscreen on a 16:10 laptop). Controller
+    # emits AFTER swapping the active ROI profile so UI listeners just
+    # need to redraw — sections subscribed to settings_dirty see the
+    # updated coords automatically.
+    aspect_changed = Signal(str, bool)    # (new_aspect, used_existing_profile)
+    # Auto window-detection found / re-found a game window HWND while
+    # the previous one was missing. Floater / Win32 input backends
+    # listen so they can re-attach to the new hwnd without the user
+    # having to re-pick from the Capture section.
+    game_window_found = Signal(int, str)    # (hwnd, title)
     # Live captured frame (numpy BGRA), latest analysis, and fps.
     # Emitted from AppWindow so any widget (dashboard preview, fullscreen
     # window, …) can mirror the real game image without each rebuilding

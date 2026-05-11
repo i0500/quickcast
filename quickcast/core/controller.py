@@ -121,6 +121,11 @@ class MacroController:
         while not self._stop.is_set():
             try:
                 frame = self.capture.grab()
+                # Aspect-ratio profile sync — keeps HP/MP/PK/POTION coords
+                # correct when the game window switches between 16:9 (PC
+                # monitor) and 16:10 / 3:2 (typical laptop). Cheap: a
+                # dict lookup + maybe one Pydantic copy per ratio flip.
+                self._maybe_sync_aspect()
                 analysis = self.recognizer.analyze(frame, self.settings)
                 with self._latest_lock:
                     self._latest_frame = frame
@@ -159,6 +164,46 @@ class MacroController:
                 self._stop.wait(sleep_for)
             else:
                 next_tick = time.monotonic()
+
+    def _maybe_sync_aspect(self) -> None:
+        """Check the capture source's current aspect bucket; switch ROI
+        profile when it changes.
+
+        Reads ``capture.last_source_size`` (set inside grab()) and calls
+        ``settings.sync_aspect()``. On a real change, emits both
+        ``settings_dirty`` (so AppWindow's debounced save writes the
+        newly-active profile to disk) and ``aspect_changed`` (so the
+        preview / status bar can repaint with the new coords).
+        """
+        size = getattr(self.capture, "last_source_size", None)
+        if not size or size[0] <= 0 or size[1] <= 0:
+            return
+        try:
+            from quickcast.config import classify_aspect
+        except Exception:
+            return
+        aspect = classify_aspect(size[0], size[1])
+        if aspect == self.settings.active_aspect:
+            return
+        try:
+            changed, used_existing = self.settings.sync_aspect(aspect)
+        except Exception:
+            logger.exception("aspect-sync: sync_aspect failed")
+            return
+        if not changed:
+            return
+        verb = "기존 프로필 적용" if used_existing else "새 프로필 생성"
+        logger.info(
+            f"📐 화면비 전환: {aspect}  ({size[0]}×{size[1]})  → {verb}"
+        )
+        try:
+            from quickcast.ui.design.signals import bus
+            bus.aspect_changed.emit(aspect, bool(used_existing))
+            bus.settings_dirty.emit()
+        except Exception:
+            # Bus may not be importable in headless / test contexts —
+            # that's fine, aspect data is already on the settings object.
+            pass
 
     # ───────── control thread ─────────
     def _control_loop(self) -> None:

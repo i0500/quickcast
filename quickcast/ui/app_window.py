@@ -137,6 +137,14 @@ class AppWindow(AppShell):
         self._poll_timer.timeout.connect(self._poll_save)
         self._poll_timer.start()
 
+        # Auto window-detection (every 5s while no game window is bound).
+        # The user can launch the game AFTER QuickCast and have it picked
+        # up automatically — same path as the manual Capture-section pick.
+        self._auto_find_timer = QTimer(self)
+        self._auto_find_timer.setInterval(5_000)
+        self._auto_find_timer.timeout.connect(self._auto_find_game_window)
+        self._auto_find_timer.start()
+
         # 4. Live recognition: controller.on_analysis fires on capture
         #    thread → marshal to UI → update status bar + bus.
         if self.controller is not None:
@@ -649,6 +657,78 @@ class AppWindow(AppShell):
             level="success", duration_ms=2000,
         )
 
+    # ───────── auto game-window detection ─────────
+    def _auto_find_game_window(self) -> None:
+        """Re-scan visible windows every 5s for a Lineage W match.
+
+        Runs only when the controller has no live HWND bound (e.g. user
+        launched QuickCast before the game, or the game crashed and was
+        restarted). On a successful match: persists the title, calls the
+        existing hot-swap path so capture / input backends rewire, and
+        emits ``game_window_found`` so the floater can re-attach.
+        """
+        if self.controller is None:
+            return
+        # Skip when we already have an alive hwnd — the existing capture
+        # path (and minimised-window grace logic) handles the live case.
+        try:
+            from quickcast.utils.window_finder import (
+                find_window, is_window_alive, _window_title,
+            )
+        except Exception:
+            return
+        cur_hwnd = int(getattr(self.controller, "_auto_hwnd", 0) or 0)
+        if cur_hwnd and is_window_alive(cur_hwnd):
+            return
+
+        # Prefer the user's saved title (if any), then the configured
+        # default patterns. Mirrors _build_capture() in main.py.
+        patterns: list[str] = []
+        saved = (self.settings.capture_window_title or "").strip()
+        if saved:
+            patterns.append(saved)
+        patterns.extend(getattr(self.settings, "game_window_patterns", []) or [])
+        if not patterns:
+            return
+
+        hwnd = find_window(patterns)
+        if not hwnd:
+            return
+
+        full_title = _window_title(hwnd) or saved or "리니지W"
+        # Persist a stable substring so a character-name change doesn't
+        # break the saved pick (matches main._build_capture behaviour).
+        stable = (
+            full_title.split(" | ", 1)[0].split("|", 1)[0].strip()
+            or full_title
+        )
+        if self.settings.capture_window_title != stable:
+            self.settings.capture_window_title = stable
+            self.save_debounced()
+
+        logger.success(f"🎯 게임창 자동 감지: '{full_title}' (hwnd 0x{hwnd:X})")
+        try:
+            NotificationCenter.toast(
+                f"🎯 게임창 자동 연결: {full_title[:24]}",
+                level="success", duration_ms=2200,
+            )
+        except Exception:
+            pass
+
+        # Trigger the existing hot-swap path so capture + input backends
+        # are rebuilt. _hot_swap_capture reads capture_window_title we
+        # just persisted above and falls through to find_window itself.
+        try:
+            self._hot_swap_capture()
+        except Exception:
+            logger.exception("auto-find: hot_swap_capture failed")
+
+        # Broadcast for the floater + anything else that wants to react.
+        try:
+            bus.game_window_found.emit(int(hwnd), full_title)
+        except Exception:
+            pass
+
     # ───────── capture hot-swap ─────────
     def _hot_swap_capture(self) -> None:
         """Swap controller.capture to the saved capture_window_title (live).
@@ -741,6 +821,12 @@ class AppWindow(AppShell):
                 f"🎯 캡처 전환: {used} → '{full_title}' "
                 f"({rect.width}x{rect.height})"
             )
+            # Broadcast so the floater (and anything else holding an
+            # hwnd reference) re-attaches to the new target window.
+            try:
+                bus.game_window_found.emit(int(hwnd), full_title)
+            except Exception:
+                pass
         except Exception:
             logger.exception("capture-swap: hot-swap failed")
             NotificationCenter.toast("캡처 전환 실패 — 로그 확인", level="danger")

@@ -135,6 +135,10 @@ class WindowPrintCapture:
             np.empty((TARGET_H, TARGET_W, 4), dtype=np.uint8) for _ in range(3)
         ]
         self._pool_idx: int = 0
+        # Width/height of the most recent SOURCE client rect (pre-resize).
+        # Read by the controller to detect aspect-ratio changes and swap
+        # ROI profiles accordingly.
+        self.last_source_size: tuple[int, int] = (0, 0)
 
     @property
     def description(self) -> str:
@@ -259,6 +263,7 @@ class WindowPrintCapture:
         frame = Frame(image=dst)
         # Cache so subsequent grabs survive transient minimisation.
         self._last_frame = frame
+        self.last_source_size = (int(w), int(h))
         return frame
 
     def close(self) -> None:

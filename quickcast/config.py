@@ -50,6 +50,52 @@ class Point(BaseModel):
     y: int = 0
 
 
+class RoiProfile(BaseModel):
+    """One ROI coordinate set for a specific aspect-ratio bucket.
+
+    The top-level Settings.hp_cap / mp_cap / pk.cap / potion.cap fields
+    are the *active* snapshot — copied in/out of Settings.roi_profiles
+    whenever the captured frame's aspect ratio changes. Storing them as
+    a profile here lets desktop (16:9) and laptop (16:10 / 3:2 / etc.)
+    coordinates coexist without one stomping the other.
+    """
+    hp_cap: Point = Field(default_factory=lambda: Point(x=78, y=24))
+    hp_cap_w: int = 160
+    hp_cap_h: int = 5
+    mp_cap: Point = Field(default_factory=lambda: Point(x=76, y=35))
+    mp_cap_w: int = 157
+    mp_cap_h: int = 6
+    pk_cap: Point = Field(default_factory=lambda: Point(x=1089, y=561))
+    pk_cap_w: int = 25
+    pk_cap_h: int = 25
+    potion_cap: Point = Field(default_factory=lambda: Point(x=503, y=646))
+    potion_cap_w: int = 13
+    potion_cap_h: int = 13
+
+
+# Coarse aspect-ratio buckets used to key ROI profiles. The frame is
+# always normalised to 1280×720 (16:9 inside the recognizer) but the
+# *source* client area dictates how vertical/horizontal HUD elements
+# end up after that resize, so we key on the source aspect.
+ASPECT_BUCKETS: list[tuple[float, str]] = [
+    (32 / 9,  "32:9"),
+    (21 / 9,  "21:9"),
+    (16 / 9,  "16:9"),
+    (16 / 10, "16:10"),
+    (3 / 2,   "3:2"),
+    (4 / 3,   "4:3"),
+    (5 / 4,   "5:4"),
+]
+
+
+def classify_aspect(width: int, height: int) -> str:
+    """Bucket a source w×h into the nearest standard aspect label."""
+    if width <= 0 or height <= 0:
+        return "16:9"
+    r = width / height
+    return min(ASPECT_BUCKETS, key=lambda kv: abs(kv[0] - r))[1]
+
+
 class Slot(BaseModel):
     """Generic action slot (1~9, 0, and dynamically added 11+)."""
     label: str
@@ -204,6 +250,16 @@ class Settings(BaseModel):
     # avoid accidental edits during gameplay.
     roi_locked: bool = False
 
+    # Aspect-ratio ROI profiles — keyed by labels from classify_aspect()
+    # ("16:9", "16:10", "3:2"…). The top-level hp_cap / mp_cap / pk.cap /
+    # potion.cap fields above are the *active* snapshot, copied in/out
+    # of this dict by sync_aspect() whenever the captured frame's source
+    # aspect changes. Empty dict on first run; populated as new ratios
+    # are encountered (current coords cloned as the seed for each new
+    # bucket, then user can fine-tune per ratio).
+    roi_profiles: dict[str, RoiProfile] = Field(default_factory=dict)
+    active_aspect: str = ""
+
     # Town-return recovery sequence — clicks a preset list of points to
     # navigate back to hunting after a forced return event.
     recovery: "RecoverySettings" = Field(default_factory=lambda: RecoverySettings())
@@ -226,8 +282,71 @@ class Settings(BaseModel):
     # re-launch it.
     tutorial_completed: bool = False
 
+    # ───────── ROI profile (per-aspect) ─────────
+    def _snapshot_active_profile(self) -> RoiProfile:
+        """Capture current top-level ROI coords as an immutable profile."""
+        return RoiProfile(
+            hp_cap=Point(x=self.hp_cap.x, y=self.hp_cap.y),
+            hp_cap_w=self.hp_cap_w, hp_cap_h=self.hp_cap_h,
+            mp_cap=Point(x=self.mp_cap.x, y=self.mp_cap.y),
+            mp_cap_w=self.mp_cap_w, mp_cap_h=self.mp_cap_h,
+            pk_cap=Point(x=self.pk.cap.x, y=self.pk.cap.y),
+            pk_cap_w=self.pk.cap_w, pk_cap_h=self.pk.cap_h,
+            potion_cap=Point(x=self.potion.cap.x, y=self.potion.cap.y),
+            potion_cap_w=self.potion.cap_w, potion_cap_h=self.potion.cap_h,
+        )
+
+    def _apply_profile(self, p: RoiProfile) -> None:
+        """Overwrite top-level ROI coords with values from a saved profile."""
+        self.hp_cap = Point(x=p.hp_cap.x, y=p.hp_cap.y)
+        self.hp_cap_w, self.hp_cap_h = int(p.hp_cap_w), int(p.hp_cap_h)
+        self.mp_cap = Point(x=p.mp_cap.x, y=p.mp_cap.y)
+        self.mp_cap_w, self.mp_cap_h = int(p.mp_cap_w), int(p.mp_cap_h)
+        self.pk.cap = Point(x=p.pk_cap.x, y=p.pk_cap.y)
+        self.pk.cap_w, self.pk.cap_h = int(p.pk_cap_w), int(p.pk_cap_h)
+        self.potion.cap = Point(x=p.potion_cap.x, y=p.potion_cap.y)
+        self.potion.cap_w, self.potion.cap_h = int(p.potion_cap_w), int(p.potion_cap_h)
+
+    def sync_aspect(self, aspect: str) -> tuple[bool, bool]:
+        """Make `aspect` the active profile.
+
+        Returns ``(changed, used_existing)``:
+          - ``changed``: True when active_aspect actually flipped
+          - ``used_existing``: True when an existing profile was applied,
+            False when the new aspect was seeded from the current coords
+            (first time this ratio is seen).
+
+        Behaviour:
+          1. Snapshot current top-level into ``roi_profiles[old_aspect]``
+             so the user's latest edits in the old bucket survive.
+          2. If ``roi_profiles[aspect]`` exists, copy it into the active
+             top-level fields. Otherwise clone the current coords as the
+             seed for the new bucket (the user gets sensible defaults
+             and can re-drag from there).
+        """
+        if not aspect or aspect == self.active_aspect:
+            return False, False
+        if self.active_aspect:
+            self.roi_profiles[self.active_aspect] = self._snapshot_active_profile()
+        used_existing = False
+        if aspect in self.roi_profiles:
+            self._apply_profile(self.roi_profiles[aspect])
+            used_existing = True
+        else:
+            # First time seeing this aspect — clone current coords as the
+            # starting point so the user has something visible to adjust.
+            self.roi_profiles[aspect] = self._snapshot_active_profile()
+        self.active_aspect = aspect
+        return True, used_existing
+
     # ───────── persistence ─────────
     def save(self, path: Path = CONFIG_PATH) -> None:
+        # Always re-snapshot the active aspect before serialising so the
+        # on-disk state matches the live top-level coords (otherwise an
+        # edit made *after* the last aspect switch would not persist into
+        # the profile dict and would be lost on the next aspect change).
+        if self.active_aspect:
+            self.roi_profiles[self.active_aspect] = self._snapshot_active_profile()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             self.model_dump_json(indent=2),
@@ -366,5 +485,6 @@ def _default_slots() -> dict[str, Slot]:
 
 __all__ = [
     "Range", "Point", "Slot", "PkSlot", "PotionSlot",
+    "RoiProfile", "ASPECT_BUCKETS", "classify_aspect",
     "Alarm", "Settings", "CONFIG_PATH", "DATA_DIR",
 ]
