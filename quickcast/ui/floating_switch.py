@@ -309,7 +309,15 @@ class FloatingSwitch(QWidget):
         Detects a True→False transition on any tracked item and
         auto-opens the panel so the user notices. Always rebuilds the
         panel's rows if it's currently open.
+
+        Self-broadcasts (the floater toggling a row writes back to
+        Settings and emits the same bus signals to keep the main UI
+        in sync) are filtered out via _suppress_emit so we don't
+        thrash through a full rebuild every time the user clicks a
+        sub-toggle.
         """
+        if self._suppress_emit:
+            return
         cur = self._collect_use_state()
         auto_off = False
         for key, was in self._prev_use.items():
@@ -431,19 +439,35 @@ class FloatingSwitch(QWidget):
     def _broadcast_change(self) -> None:
         """Emit the same signals an in-app toggle would so the rest
         of the UI (main iOS toggles in combat / slots sections) stays
-        in lockstep with what the floater just did."""
+        in lockstep with what the floater just did.
+
+        ``_suppress_emit`` stays True past the emit so any QUEUED
+        delivery of our own signals back to ``_on_external_refresh``
+        is filtered out — that callback used to fire a full panel
+        rebuild on every sub-toggle, which made the whole floater
+        flicker / shift as widgets were torn down and recreated.
+        We release the flag on the next event-loop tick via a
+        zero-delay singleShot so it covers both immediate and
+        queued connections.
+        """
         if self._suppress_emit:
             return
+        # Pre-snapshot so the next external refresh isn't fooled into
+        # thinking *our* write was an auto-off event.
+        self._suppress_emit = True
         try:
             from quickcast.ui.design.signals import bus
-            self._suppress_emit = True
             bus.settings_dirty.emit()
             bus.slot_state_refresh.emit()
-        finally:
-            self._suppress_emit = False
-        # Update our snapshot so the next external refresh doesn't
-        # mistake our own write for an auto-off event.
+        except Exception:
+            pass
         self._prev_use = self._collect_use_state()
+        # Release the latch on the next event-loop tick so any signal
+        # our emit produced has already been consumed and ignored.
+        QTimer.singleShot(0, self._end_suppress)
+
+    def _end_suppress(self) -> None:
+        self._suppress_emit = False
 
     # ───────── window tracking ─────────
     def _track(self) -> None:
