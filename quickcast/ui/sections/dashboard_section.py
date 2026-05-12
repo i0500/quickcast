@@ -134,6 +134,10 @@ class _LivePreviewWrap(QWidget):
             pk_score=analysis.pk_score, potion_score=analysis.potion_score,
             pk_thr=self._settings.pk.threshold,
             potion_thr=self._settings.potion.threshold,
+            pk_match_xy=analysis.pk_match_xy,
+            potion_match_xy=analysis.potion_match_xy,
+            pk_match_scale=analysis.pk_match_scale,
+            potion_match_scale=analysis.potion_match_scale,
         )
         self.recognition.emit(
             int(analysis.hp), int(analysis.mp),
@@ -164,6 +168,10 @@ class _LivePreviewWrap(QWidget):
             pk_score=analysis.pk_score, potion_score=analysis.potion_score,
             pk_thr=self._settings.pk.threshold,
             potion_thr=self._settings.potion.threshold,
+            pk_match_xy=analysis.pk_match_xy,
+            potion_match_xy=analysis.potion_match_xy,
+            pk_match_scale=analysis.pk_match_scale,
+            potion_match_scale=analysis.potion_match_scale,
         )
         self.recognition.emit(
             analysis.hp, analysis.mp,

@@ -122,6 +122,35 @@ class InteractivePreview(QWidget):
         # also drags the corresponding ROI
         self._label_rects: dict[str, QRect] = {}
 
+        # Native template sizes (W, H in frame coords). Read once from
+        # the targets dir so the match overlay can draw a true-scale
+        # inner box at the matched position.
+        self._tmpl_size: dict[str, tuple[int, int]] = {
+            "pk": self._read_template_size("pk.png") or (25, 25),
+            "potion": self._read_template_size("potion.png") or (13, 13),
+        }
+        # Latest match locations + scales from the recognizer. (-1, -1)
+        # means no scan / slot OFF — overlay skipped.
+        self._match_xy: dict[str, tuple[int, int]] = {
+            "pk": (-1, -1), "potion": (-1, -1),
+        }
+        self._match_scale: dict[str, float] = {"pk": 1.0, "potion": 1.0}
+
+    @staticmethod
+    def _read_template_size(name: str) -> Optional[tuple[int, int]]:
+        from quickcast.core.recognition import TARGETS_DIR
+        p = TARGETS_DIR / name
+        if not p.exists():
+            return None
+        try:
+            data = np.fromfile(str(p), dtype=np.uint8)
+        except OSError:
+            return None
+        img = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return None
+        return (int(img.shape[1]), int(img.shape[0]))
+
     # ───────── ROI accessors (read live from settings) ─────────
     def _get_roi(self, roi_id: str) -> _RoiRect:
         s = self.settings
@@ -210,14 +239,28 @@ class InteractivePreview(QWidget):
 
     def update_recognition(self, hp: int, mp: int,
                             pk_score: float, potion_score: float,
-                            pk_thr: int, potion_thr: int) -> None:
+                            pk_thr: int, potion_thr: int,
+                            pk_match_xy: tuple[int, int] = (-1, -1),
+                            potion_match_xy: tuple[int, int] = (-1, -1),
+                            pk_match_scale: float = 1.0,
+                            potion_match_scale: float = 1.0) -> None:
         """Latest recognition values to overlay near each ROI — short labels only.
 
         Label keys follow the *active* ROI set: in OCR mode the HP / MP /
         potion readings are anchored to the text ROIs that are actually
         drawn; in legacy mode they're anchored to the original boxes.
         PK is the same key in both modes.
+
+        ``*_match_xy`` is the top-left of the matcher's best hit in
+        frame coords; ``(-1, -1)`` when not available (slot OFF or
+        template missing). ``*_match_scale`` is the template scale that
+        produced the hit (1.0 = native). Together they let the preview
+        draw a true-size inner box showing where the icon was located.
         """
+        self._match_xy["pk"] = pk_match_xy
+        self._match_xy["potion"] = potion_match_xy
+        self._match_scale["pk"] = float(pk_match_scale)
+        self._match_scale["potion"] = float(potion_match_scale)
         pk_match = pk_score >= pk_thr
         potion_match = potion_score >= potion_thr
         if getattr(self.settings, "ocr_mode", False):
@@ -270,11 +313,11 @@ class InteractivePreview(QWidget):
         return QPoint(fx, fy)
 
     # ───────── hit testing ─────────
-    # PK / Potion ROI sizes are pinned to the embedded template image's
-    # dimensions, so allowing the user to resize the box would always
-    # mismatch the template. Lock them to MOVE-only — corners and edges
-    # don't return resize handles for these IDs.
-    _SIZE_LOCKED_IDS: tuple[str, ...] = ("pk", "potion")
+    # PK / Potion ROIs are *search regions* — the user can grow them so
+    # cv2.matchTemplate hunts for the icon inside. recognition.py
+    # auto-enforces a minimum size (template native) when saved, so
+    # shrinking below that is harmless. No size-locked IDs currently.
+    _SIZE_LOCKED_IDS: tuple[str, ...] = ()
 
     def _active_roi_defs(self) -> list[tuple[str, str, QColor]]:
         """ROI set to draw / hit-test for the current mode.
@@ -600,6 +643,33 @@ class InteractivePreview(QWidget):
                 ]
                 for mx, my in mids:
                     p.drawPoint(mx, my)
+
+        # Pass 1.5: match-position overlay for PK / potion search boxes.
+        # Inside each enlarged search ROI we draw a thin white rectangle
+        # at the matcher's best-hit location, true template scale. Lets
+        # the user visually verify that template-matching locked onto
+        # the actual icon (not a stray HUD element).
+        for roi_id in ("pk", "potion"):
+            if roi_id not in rect_widget:
+                continue
+            mxy = self._match_xy.get(roi_id, (-1, -1))
+            if mxy[0] < 0 or mxy[1] < 0:
+                continue
+            tw_native, th_native = self._tmpl_size.get(roi_id, (0, 0))
+            if tw_native <= 0 or th_native <= 0:
+                continue
+            s = self._match_scale.get(roi_id, 1.0) or 1.0
+            mw = max(1, int(round(tw_native * s)))
+            mh = max(1, int(round(th_native * s)))
+            tl = self._frame_to_widget(mxy[0], mxy[1])
+            br = self._frame_to_widget(mxy[0] + mw, mxy[1] + mh)
+            inner = QRect(tl, br)
+            # White stroke (high contrast against gold/green outer box
+            # and any in-game backdrop). 2px so it stays visible even
+            # when the search box is small.
+            p.setPen(QPen(QColor(255, 255, 255), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(inner)
 
         # Pass 2: labels — placed outside each ROI in a side that minimises
         # overlap with the other ROIs.
