@@ -310,17 +310,42 @@ class MacroController:
         if (now - self._last_item_close_at) < interval:
             return
         self._last_item_close_at = now
-        # Pull the frame size so click_at can translate from the
-        # 1280×720 normalised coord to actual client pixels.
+        self.fire_item_close_now()
+
+    def fire_item_close_now(self) -> None:
+        """Click the item-close coord exactly once, regardless of timer.
+
+        Used by:
+          - the interval-driven path above (after it confirms enabled
+            + interval elapsed),
+          - the "테스트 클릭" button in the capture section, so the
+            user can verify the coordinate without waiting 5 minutes.
+        """
+        ic = getattr(self.settings, "item_close", None)
+        if ic is None:
+            return
+        hwnd = int(getattr(self, "_auto_hwnd", 0) or 0)
+        if not hwnd:
+            logger.warning("⚠️ 아이템닫기 — 게임창 미연결 상태")
+            return
         frame_size = None
         with self._latest_lock:
             if self._latest_frame is not None:
                 fh, fw = self._latest_frame.image.shape[:2]
                 frame_size = (int(fw), int(fh))
+        logger.info(
+            f"🖱️ 아이템닫기 클릭 → ({ic.x},{ic.y}) "
+            f"frame={frame_size} hwnd=0x{hwnd:X}"
+        )
         try:
             from quickcast.input_io.win32_input import click_at
+            # method="attach" — AttachThreadInput → PostMessage so the
+            # game treats our click as if it came from its own input
+            # queue. Plain "postmessage" gets silently filtered by
+            # some Lineage W builds for tiny UI buttons (the item
+            # acquired popup's close icon being one of them).
             click_at(hwnd, int(ic.x), int(ic.y),
-                      frame_size=frame_size, method="postmessage")
+                      frame_size=frame_size, method="attach")
         except Exception:
             logger.exception("item-close: click_at failed")
 

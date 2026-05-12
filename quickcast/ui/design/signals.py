@@ -42,6 +42,10 @@ class _SignalBus(QObject):
     # to enter pick mode, preview emits the chosen point on click.
     item_close_pick_request = Signal()
     item_close_pick_done = Signal(int, int)    # (frame_x, frame_y)
+    # "테스트 클릭" — capture section asks the controller to fire one
+    # item-close click immediately so the user can verify the coord
+    # without waiting for the interval timer.
+    item_close_test_request = Signal()
     # Live captured frame (numpy BGRA), latest analysis, and fps.
     # Emitted from AppWindow so any widget (dashboard preview, fullscreen
     # window, …) can mirror the real game image without each rebuilding

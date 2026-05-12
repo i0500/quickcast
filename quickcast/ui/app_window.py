@@ -133,6 +133,9 @@ class AppWindow(AppShell):
         bus.capture_target_changed.connect(self._hot_swap_capture)
         # User saved new digit templates → make recognizer pick them up.
         bus.digit_templates_changed.connect(self._on_digit_templates_changed)
+        # "테스트" button in the item-close card → controller fires
+        # one click at the saved coord immediately (no interval wait).
+        bus.item_close_test_request.connect(self._on_item_close_test)
         # Periodic safety save (every 30s, only if dirty since last save).
         self._dirty = False
         self._poll_timer = QTimer(self); self._poll_timer.setInterval(30_000)
@@ -658,6 +661,29 @@ class AppWindow(AppShell):
             f"단계 #{idx + 1} '{step.label}' 테스트 클릭 → ({step.x},{step.y})",
             level="success", duration_ms=2000,
         )
+
+    # ───────── item-close test fire ─────────
+    def _on_item_close_test(self) -> None:
+        """User clicked '테스트' next to the item-close coord — fire one
+        click at the saved (x, y) right now so they can verify it's
+        on target. Goes through the same MacroController path that the
+        interval timer uses, so the click pathway is identical."""
+        if self.controller is None:
+            return
+        fn = getattr(self.controller, "fire_item_close_now", None)
+        if fn is None:
+            return
+        try:
+            fn()
+            NotificationCenter.toast(
+                "🖱️ 아이템닫기 테스트 클릭 발사 — 게임에서 확인하세요",
+                level="success", duration_ms=2000,
+            )
+        except Exception:
+            logger.exception("item-close test fire failed")
+            NotificationCenter.toast(
+                "테스트 클릭 실패 — 로그 확인", level="danger", duration_ms=3000,
+            )
 
     # ───────── OCR digit-templates reload ─────────
     def _on_digit_templates_changed(self) -> None:

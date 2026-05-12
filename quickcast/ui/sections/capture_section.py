@@ -644,6 +644,16 @@ def make_capture() -> tuple[QWidget, QWidget]:
     pick_btn.clicked.connect(_pick_item_close)
     coord_row.addWidget(pick_btn)
 
+    test_btn = IconButton("테스트", "play", variant="secondary", size="sm")
+    test_btn.setToolTip("지금 좌표로 1회 클릭해서 위치가 맞는지 확인")
+    def _test_item_close() -> None:
+        try:
+            bus.item_close_test_request.emit()
+        except Exception:
+            pass
+    test_btn.clicked.connect(_test_item_close)
+    coord_row.addWidget(test_btn)
+
     ic_reset = _make_reset_button()
     def _reset_ic() -> None:
         mock_settings.item_close.x = 0
