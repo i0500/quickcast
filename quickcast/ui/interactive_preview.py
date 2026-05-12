@@ -519,25 +519,40 @@ class InteractivePreview(QWidget):
         # text region that happens to overlap.
         active_defs.sort(key=lambda d: 1 if d[0] in ("pk", "potion") else 0)
 
+        # Tiny icon ROIs (25×25, 13×13) shrink to ~10 widget pixels at
+        # typical preview scale. We grow the *drawn* box around its
+        # centre to at least MIN_VISIBLE_PX so the user can actually
+        # see and target it — the underlying ROI / search region in
+        # settings is unchanged.
+        MIN_VISIBLE_PX = 22
+
         for roi_id, _label, color in active_defs:
             r = self._get_roi(roi_id)
             tl = self._frame_to_widget(r.x, r.y)
             br = self._frame_to_widget(r.x + r.w, r.y + r.h)
             wrect = QRect(tl, br)
+            is_small = roi_id in ("pk", "potion")
+
+            if is_small and (wrect.width() < MIN_VISIBLE_PX
+                              or wrect.height() < MIN_VISIBLE_PX):
+                cx = wrect.center().x()
+                cy = wrect.center().y()
+                nw = max(wrect.width(), MIN_VISIBLE_PX)
+                nh = max(wrect.height(), MIN_VISIBLE_PX)
+                wrect = QRect(cx - nw // 2, cy - nh // 2, nw, nh)
+
             rect_widget[roi_id] = wrect
 
-            # Small icon ROIs (PK / POTION) get a thicker stroke + corner
-            # markers so they're visible against the game background even
-            # at the preview's down-scaled resolution.
-            is_small = roi_id in ("pk", "potion")
-            stroke = 2 if is_small else 1
+            # Stroke: 3px for small icon ROIs, 1px otherwise.
+            stroke = 3 if is_small else 1
             p.setPen(QPen(color, stroke)); p.setBrush(Qt.NoBrush)
             p.drawRect(wrect)
             if is_small:
-                # 4-pixel solid corner squares mark the box edges plainly.
+                # 5-pixel solid corner squares anchor the box visually
+                # even on busy game backgrounds.
                 p.setBrush(color)
                 p.setPen(Qt.NoPen)
-                sz = 4
+                sz = 5
                 for cx, cy in (
                     (wrect.left(), wrect.top()),
                     (wrect.right() - sz, wrect.top()),
