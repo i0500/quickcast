@@ -270,7 +270,8 @@ def make_capture() -> tuple[QWidget, QWidget]:
         "OCR — 텍스트 기반 인식 (베타)",
         subtitle=(
             "HP/MP/물약 숫자를 텍스트로 직접 읽습니다. 화면 크기 어디서나 자동 추적.\n"
-            "1) [자동 영역 검출] → 2) 각 글자 1회 [학습] → 3) [OCR 모드 사용] 체크"
+            "1) [자동 영역 검출] → 2) 각 행마다 [학습] 여러 번 (서로 다른 값으로) "
+            "→ 3) [OCR 모드 사용] 체크. 학습 누적할수록 정확도 향상."
         ),
     )
 
@@ -455,6 +456,23 @@ def make_capture() -> tuple[QWidget, QWidget]:
                 # the bus subscription wired in AppWindow.
                 try:
                     bus.digit_templates_changed.emit()
+                except Exception:
+                    pass
+                # Show per-label sample counts + total so the user sees
+                # the cumulative training progress and is nudged to
+                # keep adding passes for better accuracy.
+                try:
+                    from quickcast.ui.components.notification_center import NotificationCenter
+                    from quickcast.core.digit_store import instance_counts
+                    added = dlg.added_summary()
+                    counts = instance_counts()
+                    if added:
+                        # "1: 2개 (총 5), 2: 1개 (총 3) ..."
+                        bits = []
+                        for ch, n in sorted(added.items()):
+                            bits.append(f"{ch} +{n} (총 {counts.get(ch, n)})")
+                        msg = "🔤 학습 추가됨 — " + ", ".join(bits)
+                        NotificationCenter.toast(msg, level="success", duration_ms=3200)
                 except Exception:
                     pass
         train.clicked.connect(_train)

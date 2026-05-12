@@ -131,7 +131,11 @@ class OcrCalibrationDialog(QDialog):
         self.setMinimumWidth(560)
 
         self._roi = roi_bgra
-        self._templates: dict[str, np.ndarray] = {}
+        self._templates: dict[str, list[np.ndarray]] = {}
+        # Per-label count of glyphs added by THIS dialog session.
+        # Capture-section reads it on success to show "added X samples"
+        # toast that nudges the user toward more training passes.
+        self._added_per_label: dict[str, int] = {}
 
         v = QVBoxLayout(self); v.setContentsMargins(16, 16, 16, 16)
         v.setSpacing(10)
@@ -241,13 +245,19 @@ class OcrCalibrationDialog(QDialog):
         if len(text) != len(boxes) or not boxes:
             return
 
-        # Merge with whatever's already on disk so multiple training
-        # passes (HP then MP) accumulate templates instead of replacing.
+        # APPEND to the on-disk instance list — don't overwrite. Every
+        # training pass adds fresh per-glyph samples so the matcher can
+        # pick the best-fitting one at inference. After many passes the
+        # store ends up with e.g. 7 distinct "9" masks (from "999/2999",
+        # "1099/4099", …), which makes OCR robust to subtle rendering
+        # differences from one capture to the next.
         existing = load_templates()
-        new_templates: dict[str, np.ndarray] = dict(existing)
-        # Use the same threshold the user saw on screen so the saved
-        # templates match what segmentation will produce at inference.
+        # Copy so we don't mutate the loaded dict's lists in place.
+        new_templates: dict[str, list[np.ndarray]] = {
+            k: list(v) for k, v in existing.items()
+        }
         thr_val = self._canvas.threshold
+        added_per_label: dict[str, int] = {}
         for ch, (x, y, w, h) in zip(text, boxes):
             crop = self._roi[y : y + h, x : x + w]
             mask = _binarise(crop, threshold=thr_val)
@@ -258,15 +268,25 @@ class OcrCalibrationDialog(QDialog):
             if ys.size == 0 or xs.size == 0:
                 continue
             mask = mask[ys[0] : ys[-1] + 1, xs[0] : xs[-1] + 1]
-            new_templates[ch] = mask
+            new_templates.setdefault(ch, []).append(mask)
+            added_per_label[ch] = added_per_label.get(ch, 0) + 1
 
         save_templates(new_templates)
         self._templates = new_templates
+        self._added_per_label = added_per_label
         self.accept()
 
-    def templates(self) -> dict[str, np.ndarray]:
+    def templates(self) -> dict[str, list[np.ndarray]]:
         """Return the templates dict the user just saved (empty on cancel)."""
         return self._templates
+
+    def added_summary(self) -> dict[str, int]:
+        """{label: instances_added_this_session}. Empty on cancel."""
+        return dict(self._added_per_label)
+
+    def total_instances(self) -> int:
+        """Total instances stored across all labels (post-save)."""
+        return sum(len(v) for v in self._templates.values())
 
     def chosen_threshold(self) -> Optional[int]:
         """The binarisation threshold value the user landed on.

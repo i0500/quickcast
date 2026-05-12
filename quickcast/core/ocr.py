@@ -159,14 +159,55 @@ def _glyph_patch(roi_bgra: np.ndarray,
     return _binarise(crop, threshold=threshold)
 
 
-def _best_label(glyph_mask: np.ndarray,
-                 templates: dict[str, np.ndarray]) -> tuple[str, float]:
-    """Match a glyph against every template; return (label, score).
+def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
+    """Score one (glyph, template) pair via TM_CCOEFF_NORMED.
 
-    Templates are resized to the glyph's height so the matcher only sees
-    same-size inputs (cv2.matchTemplate requires it). Width is scaled
-    proportionally. Score is the TM_CCOEFF_NORMED value at (0, 0) since
-    both inputs are the same size and we just want a similarity score.
+    The template is height-matched to the glyph (width scales
+    proportionally). When the resulting width differs from the
+    glyph's, we pad / centre-crop so cv2.matchTemplate sees equal
+    sized inputs. Negative score on any failure.
+    """
+    gh, gw = glyph_mask.shape
+    if gh == 0 or gw == 0:
+        return -1.0
+    th, tw = tmpl.shape[:2]
+    if th == 0 or tw == 0:
+        return -1.0
+    scale = gh / th
+    new_w = max(1, int(round(tw * scale)))
+    new_h = gh
+    if new_w == tw and new_h == th:
+        resized = tmpl
+    else:
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        resized = cv2.resize(tmpl, (new_w, new_h), interpolation=interp)
+    if gw < new_w:
+        pad_total = new_w - gw
+        pad_l = pad_total // 2
+        pad_r = pad_total - pad_l
+        search = cv2.copyMakeBorder(glyph_mask, 0, 0, pad_l, pad_r,
+                                      cv2.BORDER_CONSTANT, value=0)
+    elif gw > new_w:
+        x0 = (gw - new_w) // 2
+        search = glyph_mask[:, x0 : x0 + new_w]
+    else:
+        search = glyph_mask
+    try:
+        result = cv2.matchTemplate(search, resized, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+    except cv2.error:
+        return -1.0
+    return float(max_val)
+
+
+def _best_label(glyph_mask: np.ndarray,
+                 templates: dict[str, list[np.ndarray]]) -> tuple[str, float]:
+    """Match a glyph against every instance of every label.
+
+    Returns (label, score) of the single best instance across all
+    labels. With multi-instance templates we don't average — averaging
+    would pull a strong instance down toward the weakest. Best-of-N is
+    the right aggregator for "which glyph did I just see".
     """
     if not templates:
         return ("", 0.0)
@@ -174,47 +215,30 @@ def _best_label(glyph_mask: np.ndarray,
     if gh == 0 or gw == 0:
         return ("", 0.0)
     best = ("", -1.0)
-    for label, tmpl in templates.items():
-        th, tw = tmpl.shape[:2]
-        if th == 0 or tw == 0:
-            continue
-        # Scale template to match glyph height; keep aspect ratio.
-        scale = gh / th
-        new_w = max(1, int(round(tw * scale)))
-        new_h = gh
-        if new_w == tw and new_h == th:
-            resized = tmpl
-        else:
-            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
-            resized = cv2.resize(tmpl, (new_w, new_h), interpolation=interp)
-        # Need glyph as wide as the template to match. If glyph is
-        # narrower, pad it with zeros (matches "skinny digit hit by
-        # binarisation noise" failure mode). If wider, crop centre.
-        if gw < new_w:
-            pad_total = new_w - gw
-            pad_l = pad_total // 2
-            pad_r = pad_total - pad_l
-            search = cv2.copyMakeBorder(glyph_mask, 0, 0, pad_l, pad_r,
-                                          cv2.BORDER_CONSTANT, value=0)
-        elif gw > new_w:
-            x0 = (gw - new_w) // 2
-            search = glyph_mask[:, x0 : x0 + new_w]
-        else:
-            search = glyph_mask
-        try:
-            result = cv2.matchTemplate(search, resized, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, _ = cv2.minMaxLoc(result)
-        except cv2.error:
-            continue
-        if max_val > best[1]:
-            best = (label, float(max_val))
+    for label, instances in templates.items():
+        # Accept legacy single-array templates for callers that still
+        # pass dict[str, np.ndarray] (e.g. older tests).
+        if isinstance(instances, np.ndarray):
+            instances = [instances]
+        for tmpl in instances:
+            if tmpl is None:
+                continue
+            score = _score_against(glyph_mask, tmpl)
+            if score > best[1]:
+                best = (label, score)
     return best
 
 
 def recognise(roi_bgra: np.ndarray,
-               templates: dict[str, np.ndarray],
+               templates: dict[str, list[np.ndarray]],
                threshold: Optional[int] = None) -> OcrResult:
     """Run the full OCR pipeline on one ROI.
+
+    ``templates`` is now ``{label: [mask, ...]}`` — a list of learned
+    instances per glyph. The matcher picks the highest-scoring instance
+    across all labels for each glyph in the ROI. The legacy
+    ``{label: mask}`` form is also accepted (treated as a single
+    instance) for backward compatibility.
 
     ``threshold`` (0..255 or None) MUST match the binarisation value
     the templates were learned at. Passing a different threshold makes
