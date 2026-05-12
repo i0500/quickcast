@@ -374,11 +374,17 @@ class FloatingSwitch(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(2)
         lbl = QLabel(label_text)
+        # font-size has to live INSIDE the stylesheet — Qt's stylesheet
+        # engine overrides any QFont/setFont when there's a QSS rule
+        # on the widget, which silently kept the rows at the default
+        # ~9 pt instead of our intended ROW_LABEL_PT.
         lbl.setStyleSheet(
-            f"color:{'#cfd6e2' if state else '#7f8694'};"
+            f"QLabel {{"
+            f" color:{'#cfd6e2' if state else '#7f8694'};"
+            f" font-size:{ROW_LABEL_PT}pt;"
             f" padding:0; margin:0;"
+            f"}}"
         )
-        f = QFont(); f.setPointSize(ROW_LABEL_PT); lbl.setFont(f)
         lbl.setMinimumWidth(0)
         h.addWidget(lbl, 1)
         tgl = IOSToggle(width=ROW_TOGGLE_W, height=ROW_TOGGLE_H, parent=row)
