@@ -323,33 +323,100 @@ def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
     return float(max_val) * penalty
 
 
-def _best_label(glyph_mask: np.ndarray,
-                 templates: dict[str, list[np.ndarray]]) -> tuple[str, float]:
-    """Match a glyph against every instance of every label.
+def _best_labels(glyph_mask: np.ndarray,
+                   templates: dict[str, list[np.ndarray]],
+                   n: int = 2) -> list[tuple[str, float]]:
+    """Top-n (label, score) candidates for one glyph, score-descending.
 
-    Returns (label, score) of the single best instance across all
-    labels. With multi-instance templates we don't average — averaging
-    would pull a strong instance down toward the weakest. Best-of-N is
-    the right aggregator for "which glyph did I just see".
+    Domain post-processing in recognise() needs the *second*-best
+    candidate so it can correct unlikely leading-zero results: "0350"
+    almost always means "5350" or "3350" depending on which digit
+    came in second on column 0. Top-1 alone hides that.
+
+    Per-label score is best-of-instances (matches the original
+    _best_label semantics so single-best behaviour is unchanged).
+    Returns at most ``n`` entries; can return fewer if fewer labels
+    are trained.
     """
     if not templates:
-        return ("", 0.0)
+        return []
     gh, gw = glyph_mask.shape
     if gh == 0 or gw == 0:
-        return ("", 0.0)
-    best = ("", -1.0)
+        return []
+    label_best: list[tuple[str, float]] = []
     for label, instances in templates.items():
-        # Accept legacy single-array templates for callers that still
-        # pass dict[str, np.ndarray] (e.g. older tests).
         if isinstance(instances, np.ndarray):
             instances = [instances]
+        per_label = -1.0
         for tmpl in instances:
             if tmpl is None:
                 continue
             score = _score_against(glyph_mask, tmpl)
-            if score > best[1]:
-                best = (label, score)
-    return best
+            if score > per_label:
+                per_label = score
+        if per_label >= 0:
+            label_best.append((label, per_label))
+    label_best.sort(key=lambda kv: -kv[1])
+    return label_best[: max(1, n)]
+
+
+def _best_label(glyph_mask: np.ndarray,
+                 templates: dict[str, list[np.ndarray]]) -> tuple[str, float]:
+    """Thin wrapper kept for callers that only want the top-1 result."""
+    tops = _best_labels(glyph_mask, templates, n=1)
+    return tops[0] if tops else ("", 0.0)
+
+
+def _apply_no_leading_zero(
+    box_labels: list[str],
+    per_box_tops: list[list[tuple[str, float]]],
+    box_scores: Optional[list[float]] = None,
+) -> None:
+    """Rewrite leading '0' digits in multi-digit groups in place.
+
+    A HUD counter never reads "0350" — that string only appears when
+    OCR mislabelled the first glyph as '0' because the right template
+    wasn't trained or had a less-matching width. We split the label
+    sequence on '/' and, for each group of length ≥ 2 starting with
+    '0', try the second-best candidate for the first glyph.
+
+    Replacement only happens when the runner-up's score is at least
+    50 % of the winner's — so a confident "really is zero" result
+    (e.g. single-digit "0" or "0/100") never gets overruled by a
+    low-score guess.
+    """
+    # Identify group boundaries: each '/' is a delimiter.
+    boundaries: list[int] = [-1]
+    for i, lab in enumerate(box_labels):
+        if lab == "/":
+            boundaries.append(i)
+    boundaries.append(len(box_labels))
+
+    for j in range(len(boundaries) - 1):
+        start = boundaries[j] + 1
+        end = boundaries[j + 1]
+        # Skip "/" itself — only operate inside real number groups.
+        # Also skip empty groups (two '/' in a row, shouldn't happen).
+        if end - start < 2:
+            continue
+        # Skip if the first slot already isn't '0' or has no candidates.
+        if start >= len(box_labels) or box_labels[start] != "0":
+            continue
+        tops = per_box_tops[start] if start < len(per_box_tops) else []
+        if len(tops) < 2:
+            continue
+        first_lab, first_sc = tops[0]
+        second_lab, second_sc = tops[1]
+        # If the runner-up isn't a digit (e.g. '/'), skip — leading
+        # '/' makes no sense for a number group.
+        if not second_lab or second_lab == "/":
+            continue
+        # Only swap when second is plausibly competitive.
+        if first_sc <= 0 or (second_sc / first_sc) < 0.5:
+            continue
+        box_labels[start] = second_lab
+        if box_scores is not None and start < len(box_scores):
+            box_scores[start] = second_sc
 
 
 def recognise(roi_bgra: np.ndarray,
@@ -382,16 +449,33 @@ def recognise(roi_bgra: np.ndarray,
         return OcrResult(current=None, maximum=None, text="",
                           confidence=0.0, glyphs=[])
 
-    labels: list[str] = []
-    scores: list[float] = []
-    diag: list[tuple[str, float]] = []
+    # Gather top-2 candidates per glyph so the post-processor can
+    # swap a leading-zero misread for its plausible runner-up.
+    per_box_tops: list[list[tuple[str, float]]] = []
     for box in boxes:
         gm = _glyph_patch(roi_bgra, box, threshold=threshold)
-        lab, sc = _best_label(gm, templates)
-        diag.append((lab, sc))
-        if lab:
-            labels.append(lab)
-            scores.append(sc)
+        tops = _best_labels(gm, templates, n=2)
+        per_box_tops.append(tops)
+
+    # Top-1 picks for each box; "" placeholders for boxes that
+    # produced no candidates at all.
+    box_labels: list[str] = [t[0][0] if t else "" for t in per_box_tops]
+    box_scores: list[float] = [t[0][1] if t else 0.0 for t in per_box_tops]
+
+    # Domain rule: a HUD counter never carries a leading zero unless
+    # it IS zero. So inside each "/" -separated group, if length ≥ 2
+    # and the first glyph came back as '0', try the second-best
+    # candidate — but only if it's plausibly competitive (score
+    # within 50 % of the top so a confident real "0" isn't overruled
+    # by a low-score guess).
+    _apply_no_leading_zero(box_labels, per_box_tops, box_scores)
+
+    # Strip empty placeholders for the final accounting.
+    labels: list[str] = [lab for lab in box_labels if lab]
+    scores: list[float] = [sc for lab, sc in zip(box_labels, box_scores) if lab]
+    diag: list[tuple[str, float]] = [
+        (lab, sc) for lab, sc in zip(box_labels, box_scores)
+    ]
 
     text = "".join(labels)
     conf = float(sum(scores) / len(scores)) if scores else 0.0
