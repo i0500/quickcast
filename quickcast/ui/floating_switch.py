@@ -26,27 +26,34 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QMouseEvent, QPainter,
 )
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget,
 )
 
+from quickcast.ui.design.icons import Icon
 from quickcast.ui.ios_toggle import IOSToggle
 from quickcast.utils.window_finder import (
     get_client_rect_screen, get_window_rect, is_window_alive,
 )
 
-# Half the size of the previous floater
+# Top-bar sizing — kept identical to the previous "small pill" floater
+# so existing user anchors stay sensible after the expand-panel update.
 TOGGLE_W = 36
 TOGGLE_H = 20
 PAD_X = 8
 PAD_Y = 6
 LABEL_MIN_W = 32
-ROW_TOGGLE_W = 32
-ROW_TOGGLE_H = 18
+EXPAND_BTN_PX = 16
+
+# Sub-toggle row sizing — much tighter than the top bar so the panel
+# stays narrow and the rows feel like compact sub-controls.
+ROW_TOGGLE_W = 26
+ROW_TOGGLE_H = 14
+ROW_LABEL_PT = 8
 
 TRACK_INTERVAL_MS = 200
 DRAG_THRESHOLD_PX = 3
@@ -130,13 +137,15 @@ class FloatingSwitch(QWidget):
         self.toggle = IOSToggle(width=TOGGLE_W, height=TOGGLE_H, parent=self)
         self.toggle.toggled.connect(self._on_toggle)
 
-        self._expand_btn = QPushButton("▼", self)
-        self._expand_btn.setFixedSize(20, 20)
+        self._expand_btn = QToolButton(self)
+        self._expand_btn.setFixedSize(EXPAND_BTN_PX + 6, EXPAND_BTN_PX + 6)
+        self._expand_btn.setIconSize(QSize(EXPAND_BTN_PX, EXPAND_BTN_PX))
+        self._expand_btn.setIcon(Icon.get("chevron-down", EXPAND_BTN_PX, "#cfd6e2"))
         self._expand_btn.setCursor(Qt.PointingHandCursor)
         self._expand_btn.setStyleSheet(
-            "QPushButton { color:#cfd6e2; background:transparent;"
-            " border:none; font-weight:bold; font-size:10px; }"
-            "QPushButton:hover { color:#ffffff; }"
+            "QToolButton { background:transparent; border:none; }"
+            "QToolButton:hover { background:rgba(255,255,255,0.10);"
+            " border-radius:3px; }"
         )
         self._expand_btn.clicked.connect(self._toggle_panel)
 
@@ -153,18 +162,29 @@ class FloatingSwitch(QWidget):
         # ── Expand panel (rebuilt on demand) ──
         self._panel = QWidget(self)
         self._panel_layout = QVBoxLayout(self._panel)
-        self._panel_layout.setContentsMargins(0, 4, 0, 0)
-        self._panel_layout.setSpacing(2)
+        self._panel_layout.setContentsMargins(0, 0, 0, 0)
+        self._panel_layout.setSpacing(0)
         self._panel.setVisible(False)
+        # Thin divider line above the panel so the visual boundary is
+        # clear without paying horizontal padding.
+        self._divider = QFrame(self)
+        self._divider.setFrameShape(QFrame.HLine)
+        self._divider.setStyleSheet("color:rgba(255,255,255,0.10);"
+                                       " background:rgba(255,255,255,0.10);"
+                                       " border:none; max-height:1px;")
+        self._divider.setVisible(False)
 
-        # Master VBox
+        # Master VBox — tight margins so the floater stays small.
         v = QVBoxLayout(self)
         v.setContentsMargins(PAD_X, PAD_Y, PAD_X, PAD_Y)
-        v.setSpacing(2)
+        v.setSpacing(0)
         v.addWidget(self._top_widget)
+        v.addWidget(self._divider)
         v.addWidget(self._panel)
         self.setLayout(v)
+        # Snap initial size; the top bar drives the floater's width.
         self.adjustSize()
+        self._top_width: int = self.width()
 
         self._tracker = QTimer(self)
         self._tracker.setInterval(TRACK_INTERVAL_MS)
@@ -233,10 +253,18 @@ class FloatingSwitch(QWidget):
         if opened:
             self._rebuild_panel()
         self._panel.setVisible(opened)
-        self._expand_btn.setText("▲" if opened else "▼")
+        self._divider.setVisible(opened)
+        self._expand_btn.setIcon(Icon.get(
+            "chevron-up" if opened else "chevron-down",
+            EXPAND_BTN_PX, "#cfd6e2",
+        ))
         # Anchor at top-right corner: re-fit and re-position so the
-        # panel grows downward without shifting the toggle.
+        # panel grows downward without shifting the toggle. We lock
+        # the floater width to the top bar so the panel never inflates
+        # the row above it.
         self.adjustSize()
+        if self._top_width > 0:
+            self.setFixedWidth(self._top_width)
         self._track()
 
     def _collect_use_state(self) -> dict[str, bool]:
@@ -247,6 +275,9 @@ class FloatingSwitch(QWidget):
             return out
         out["__pk__"] = bool(getattr(s.pk, "use", False))
         out["__potion__"] = bool(getattr(s.potion, "use", False))
+        rec = getattr(s, "recovery", None)
+        if rec is not None:
+            out["__recovery__"] = bool(getattr(rec, "enabled", False))
         for sid, slot in getattr(s, "slots", {}).items():
             out[f"slot:{sid}"] = bool(slot.use)
         return out
@@ -271,9 +302,9 @@ class FloatingSwitch(QWidget):
             self._rebuild_panel()
 
     def _rebuild_panel(self) -> None:
-        """Drop every existing row, then re-add PK + potion + each
-        currently-use=True slot."""
-        # Clear existing
+        """Rebuild every row: PK, 물약, 사냥복귀, then every saved slot
+        in sort order. All sub-toggles regardless of current use-state
+        so the user sees the whole control surface at a glance."""
         while self._panel_layout.count():
             item = self._panel_layout.takeAt(0)
             w = item.widget()
@@ -284,43 +315,56 @@ class FloatingSwitch(QWidget):
         if s is None:
             return
 
-        # PK
+        # PK / 물약 / 사냥복귀 — always shown at the top of the panel.
         self._add_row("PK", bool(s.pk.use),
                        lambda v: self._set_pk(bool(v)))
-        # Potion
         self._add_row("물약", bool(s.potion.use),
                        lambda v: self._set_potion(bool(v)))
-        # Slots — show use=True only, plus any that the auto-off
-        # detector flipped False in the snapshot diff so the user
-        # can re-enable them right here.
-        cur = self._collect_use_state()
-        previously_on = {
-            k for k, was in self._prev_use.items() if was and k.startswith("slot:")
-        }
-        for sid, slot in getattr(s, "slots", {}).items():
-            key = f"slot:{sid}"
-            if cur.get(key) or key in previously_on:
-                label = slot.label or f"슬롯-{sid}"
-                self._add_row(label, bool(slot.use),
-                                lambda v, _sid=sid: self._set_slot(_sid, bool(v)))
+        rec = getattr(s, "recovery", None)
+        if rec is not None:
+            self._add_row("사냥복귀", bool(getattr(rec, "enabled", False)),
+                            lambda v: self._set_recovery(bool(v)))
+
+        # Every saved slot, sorted numerically (1..9, 0, then anything
+        # custom like 11+).
+        def _slot_sort_key(sid: str) -> tuple[int, int, str]:
+            # Order: 1..9, 0, then numeric extras 11+, then non-numeric.
+            try:
+                n = int(sid)
+            except ValueError:
+                return (2, 0, sid)
+            if 1 <= n <= 9:
+                return (0, n, sid)
+            if n == 0:
+                return (0, 10, sid)
+            return (1, n, sid)
+
+        for sid in sorted(s.slots.keys(), key=_slot_sort_key):
+            slot = s.slots[sid]
+            label = slot.label or f"슬롯-{sid}"
+            self._add_row(label, bool(slot.use),
+                            lambda v, _sid=sid: self._set_slot(_sid, bool(v)))
 
     def _add_row(self, label_text: str, state: bool,
                   on_toggle) -> None:
         row = QWidget(self._panel)
+        # Constrain row height so the panel stays vertically tight.
+        row.setFixedHeight(ROW_TOGGLE_H + 4)
         h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(6)
+        h.setContentsMargins(0, 1, 0, 1)
+        h.setSpacing(2)
         lbl = QLabel(label_text)
         lbl.setStyleSheet(
-            f"color:{'#cfd6e2' if state else '#7f8694'}; padding:0 2px;"
+            f"color:{'#cfd6e2' if state else '#7f8694'};"
+            f" padding:0; margin:0;"
         )
-        f = QFont(); f.setPointSize(9); lbl.setFont(f)
-        lbl.setMinimumWidth(LABEL_MIN_W)
+        f = QFont(); f.setPointSize(ROW_LABEL_PT); lbl.setFont(f)
+        lbl.setMinimumWidth(0)
         h.addWidget(lbl, 1)
         tgl = IOSToggle(width=ROW_TOGGLE_W, height=ROW_TOGGLE_H, parent=row)
         tgl.set_state(state)
         tgl.toggled.connect(on_toggle)
-        h.addWidget(tgl)
+        h.addWidget(tgl, 0)
         self._panel_layout.addWidget(row)
 
     # ───────── settings writes ─────────
@@ -338,6 +382,15 @@ class FloatingSwitch(QWidget):
         if bool(self._settings.potion.use) == on:
             return
         self._settings.potion.use = on
+        self._broadcast_change()
+
+    def _set_recovery(self, on: bool) -> None:
+        s = self._settings
+        if s is None or getattr(s, "recovery", None) is None:
+            return
+        if bool(s.recovery.enabled) == on:
+            return
+        s.recovery.enabled = on
         self._broadcast_change()
 
     def _set_slot(self, sid: str, on: bool) -> None:
