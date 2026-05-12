@@ -93,8 +93,8 @@ def _binarise(roi_bgra: np.ndarray,
 
 
 def segment_glyphs(roi_bgra: np.ndarray,
-                     min_glyph_w: int = 2,
-                     min_glyph_h: int = 4,
+                     min_glyph_w: int = 3,
+                     min_glyph_h: int = 6,
                      threshold: Optional[int] = None,
                      ) -> list[tuple[int, int, int, int]]:
     """Find bounding boxes for each glyph in a HUD text ROI.
@@ -102,65 +102,98 @@ def segment_glyphs(roi_bgra: np.ndarray,
     Returns a list of ``(x, y, w, h)`` boxes, left-to-right. Boxes are
     in ROI-local coordinates. Empty list ⇒ no glyphs detected.
 
-    Algorithm has two passes:
+    Algorithm:
 
-    1. **Projection pass** — binarise, sum foreground pixels per column,
-       and treat each contiguous run of non-zero columns as one glyph
-       box (cropped vertically to its foreground extent).
-    2. **Width-split pass** — if some boxes ended up much wider than
-       the typical glyph (anti-aliased fringes can bridge adjacent
-       digits at low binarisation thresholds, fusing them into one
-       run), split them into ``round(width / median_width)`` equal-
-       width sub-boxes. The valley between two glued digits isn't
-       always a clean zero-column so column gaps alone miss those
-       cases; the width statistic catches them.
+    1. **Binarise** → uint8 mask.
+    2. **Connected components** (cv2.connectedComponentsWithStats,
+       8-neighbour). Each glyph is usually one connected component;
+       gauge dots, single-pixel noise, and thin separator bars are
+       *also* components, but they're filtered out by size / shape
+       rules in step 3.
+    3. **Filter & merge**:
 
-    ``threshold`` overrides the auto binarisation percentile when the
-    calibration UI exposes a slider.
+       - reject components with foreground area < 6 px (lone dots),
+       - reject very thin / very flat components (the HP bar's
+         decorative dots are 1-2 px tall, much wider than a digit
+         box; the bar itself is wider × thin),
+       - reject components whose height is way below the median
+         height of the remaining set (noise blobs below the text
+         line),
+       - merge components whose horizontal extents heavily overlap
+         (broken glyphs where binarisation chopped the top of "5"
+         off its bottom).
+
+    4. **Width-split** (``_split_wide_boxes``): if any survivor is
+       still much wider than the median glyph (low threshold fused
+       two digits), split it.
+
+    The projection-only version this replaces happily turned every
+    blob of bright pixels into a "glyph" — including bar fills and
+    dot decorations — so it was useless on the HP/MP/potion bands.
+
+    ``threshold`` overrides the auto binarisation percentile when
+    the calibration UI exposes a slider.
     """
     mask = _binarise(roi_bgra, threshold=threshold)
     h, w = mask.shape
     if h == 0 or w == 0:
         return []
 
-    col_sums = (mask > 0).sum(axis=0)
-    active = col_sums > 0
+    num, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    raw: list[tuple[int, int, int, int, int]] = []    # x, y, w, h, area
+    for i in range(1, num):
+        x, y, cw, ch, area = stats[i]
+        if cw < min_glyph_w or ch < min_glyph_h:
+            continue
+        if area < 6:                       # tiny dot / single-pixel speckle
+            continue
+        # Decorative bar / separator: very wide & very thin.
+        if cw > ch * 4:
+            continue
+        # Hollow rectangle / underline: almost no filled area for its size.
+        if area < int(cw * ch * 0.12):
+            continue
+        raw.append((int(x), int(y), int(cw), int(ch), int(area)))
 
-    boxes: list[tuple[int, int, int, int]] = []
-    in_run = False
-    run_x0 = 0
-    for x in range(w):
-        if active[x] and not in_run:
-            in_run = True
-            run_x0 = x
-        elif not active[x] and in_run:
-            in_run = False
-            x1 = x
-            gw = x1 - run_x0
-            if gw < min_glyph_w:
-                continue
-            band = mask[:, run_x0:x1]
-            rows = np.where(band.any(axis=1))[0]
-            if rows.size == 0:
-                continue
-            y0, y1 = int(rows[0]), int(rows[-1]) + 1
-            gh = y1 - y0
-            if gh < min_glyph_h:
-                continue
-            boxes.append((run_x0, y0, gw, gh))
-    # Flush a trailing run that hit the right edge without a 0-column.
-    if in_run:
-        x1 = w
-        gw = x1 - run_x0
-        if gw >= min_glyph_w:
-            band = mask[:, run_x0:x1]
-            rows = np.where(band.any(axis=1))[0]
-            if rows.size > 0:
-                y0, y1 = int(rows[0]), int(rows[-1]) + 1
-                if (y1 - y0) >= min_glyph_h:
-                    boxes.append((run_x0, y0, gw, y1 - y0))
+    if not raw:
+        return []
 
-    return _split_wide_boxes(boxes, mask)
+    # Reject blobs whose height is below 60% of the median — they're
+    # almost certainly noise sitting outside the text line.
+    heights = sorted(c[3] for c in raw)
+    med_h = heights[len(heights) // 2]
+    filtered: list[tuple[int, int, int, int]] = []
+    for x, y, cw, ch, _area in raw:
+        if ch < max(min_glyph_h, int(med_h * 0.6)):
+            continue
+        filtered.append((x, y, cw, ch))
+
+    if not filtered:
+        return []
+
+    # Sort left-to-right.
+    filtered.sort(key=lambda b: b[0])
+
+    # Merge horizontally overlapping survivors (broken glyphs that
+    # connected components split into two — e.g. "5" cross + curve).
+    merged: list[tuple[int, int, int, int]] = []
+    for box in filtered:
+        if not merged:
+            merged.append(box)
+            continue
+        px, py, pw, ph = merged[-1]
+        x, y, cw, ch = box
+        overlap = min(px + pw, x + cw) - max(px, x)
+        if overlap > min(pw, cw) * 0.4:    # >40 % horizontal overlap → same glyph
+            nx = min(px, x)
+            ny = min(py, y)
+            nw = max(px + pw, x + cw) - nx
+            nh = max(py + ph, y + ch) - ny
+            merged[-1] = (nx, ny, nw, nh)
+        else:
+            merged.append(box)
+
+    return _split_wide_boxes(merged, mask)
 
 
 def _split_wide_boxes(
