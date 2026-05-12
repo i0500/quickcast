@@ -1,19 +1,38 @@
 """Floating master switch — small iOS toggle + drag handle.
 
-Layout:
-  ┌──────────────────────┐
-  │  ON   [▣ ]           │  ← left text doubles as drag handle
-  └──────────────────────┘   right side is the iOS toggle
+Two-zone layout:
+
+  ┌─────────────────────────────┐
+  │  ON   [▣ ]            [▼]  │  ← top bar: master toggle + expand
+  ├─────────────────────────────┤
+  │  PK             [▣]         │  ← expand panel (hidden by default)
+  │  물약           [▣]         │
+  │  슬롯1          [▣]         │
+  │  …                          │
+  └─────────────────────────────┘
+
+The expand panel mirrors the live slot/PK/potion state from
+mock_settings so the user can flip individual triggers from the
+overlay without alt-tabbing. Bus signals (settings_dirty +
+slot_state_refresh) flow both directions: any external change
+rebuilds the panel; any panel toggle re-emits settings_dirty so
+the main UI's iOS toggles stay in sync.
+
+Auto-expand: when the macro itself auto-disables a one-shot
+toggle (potion fires, non-repeat slot completes, …) the panel
+opens automatically so the user sees what just got turned off.
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QMouseEvent, QPainter,
 )
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+)
 
 from quickcast.ui.ios_toggle import IOSToggle
 from quickcast.utils.window_finder import (
@@ -26,6 +45,8 @@ TOGGLE_H = 20
 PAD_X = 8
 PAD_Y = 6
 LABEL_MIN_W = 32
+ROW_TOGGLE_W = 32
+ROW_TOGGLE_H = 18
 
 TRACK_INTERVAL_MS = 200
 DRAG_THRESHOLD_PX = 3
@@ -83,6 +104,8 @@ class _DragHandle(QLabel):
 
 
 class FloatingSwitch(QWidget):
+    """Master overlay — drag/handle + master toggle + optional expand panel."""
+
     toggled = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -94,10 +117,11 @@ class FloatingSwitch(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self._target_hwnd: Optional[int] = None
-        self._user_offset: Optional[QPoint] = None  # offset from window top-right
+        self._user_offset: Optional[QPoint] = None
         self._drag_origin: Optional[QPoint] = None
         self._dragging: bool = False
 
+        # ── Top bar (master toggle + expand button) ──
         self.handle = _DragHandle(self)
         self.handle.drag_start.connect(self._on_drag_start)
         self.handle.drag_move.connect(self._on_drag_move)
@@ -106,27 +130,81 @@ class FloatingSwitch(QWidget):
         self.toggle = IOSToggle(width=TOGGLE_W, height=TOGGLE_H, parent=self)
         self.toggle.toggled.connect(self._on_toggle)
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(PAD_X, PAD_Y, PAD_X, PAD_Y)
-        lay.setSpacing(6)
-        lay.addWidget(self.handle)
-        lay.addWidget(self.toggle)
-        self.setLayout(lay)
+        self._expand_btn = QPushButton("▼", self)
+        self._expand_btn.setFixedSize(20, 20)
+        self._expand_btn.setCursor(Qt.PointingHandCursor)
+        self._expand_btn.setStyleSheet(
+            "QPushButton { color:#cfd6e2; background:transparent;"
+            " border:none; font-weight:bold; font-size:10px; }"
+            "QPushButton:hover { color:#ffffff; }"
+        )
+        self._expand_btn.clicked.connect(self._toggle_panel)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(6)
+        top_row.addWidget(self.handle)
+        top_row.addWidget(self.toggle)
+        top_row.addWidget(self._expand_btn)
+        top_widget = QWidget(self)
+        top_widget.setLayout(top_row)
+        self._top_widget = top_widget
+
+        # ── Expand panel (rebuilt on demand) ──
+        self._panel = QWidget(self)
+        self._panel_layout = QVBoxLayout(self._panel)
+        self._panel_layout.setContentsMargins(0, 4, 0, 0)
+        self._panel_layout.setSpacing(2)
+        self._panel.setVisible(False)
+
+        # Master VBox
+        v = QVBoxLayout(self)
+        v.setContentsMargins(PAD_X, PAD_Y, PAD_X, PAD_Y)
+        v.setSpacing(2)
+        v.addWidget(self._top_widget)
+        v.addWidget(self._panel)
+        self.setLayout(v)
         self.adjustSize()
 
         self._tracker = QTimer(self)
         self._tracker.setInterval(TRACK_INTERVAL_MS)
         self._tracker.timeout.connect(self._track)
 
+        # Settings + bus wiring is injected via attach_settings() below
+        # — only main.py knows the production mock_settings instance.
+        self._settings = None
+        # Cache of {key: (use, label)} from the last rebuild so we can
+        # detect auto-disabled rows and auto-expand the panel.
+        self._prev_use: dict[str, bool] = {}
+        self._suppress_emit = False    # guard recursive rebuilds
+
         self.hide()
 
     # ───────── public API ─────────
+    def attach_settings(self, settings) -> None:
+        """Wire the floater to the live Settings instance.
+
+        Must be called once after construction. Connects bus signals
+        for two-way sync and primes the initial use-state cache so
+        auto-expand can detect a True→False transition next tick.
+        """
+        self._settings = settings
+        try:
+            from quickcast.ui.design.signals import bus
+            bus.slot_state_refresh.connect(self._on_external_refresh)
+            bus.settings_dirty.connect(self._on_external_refresh)
+        except Exception:
+            pass
+        # Snapshot current use-state so the first auto-expand check
+        # has something to compare to.
+        self._prev_use = self._collect_use_state()
+
     def attach_to(self, hwnd: int) -> None:
         if not hwnd or not is_window_alive(hwnd):
             self.detach()
             return
         self._target_hwnd = hwnd
-        self._user_offset = None  # snap to default top-right corner
+        self._user_offset = None
         self._tracker.start()
         self._track()
         self.show()
@@ -141,27 +219,160 @@ class FloatingSwitch(QWidget):
         self.handle.set_state(on)
 
     def set_theme(self, _theme_id: str) -> None:
-        # iOS colours are fixed; no recolour needed.
         pass
 
     def _on_toggle(self, on: bool) -> None:
         self.handle.set_state(on)
         self.toggled.emit(on)
 
+    # ───────── expand panel ─────────
+    def _toggle_panel(self) -> None:
+        self.set_panel_open(not self._panel.isVisible())
+
+    def set_panel_open(self, opened: bool) -> None:
+        if opened:
+            self._rebuild_panel()
+        self._panel.setVisible(opened)
+        self._expand_btn.setText("▲" if opened else "▼")
+        # Anchor at top-right corner: re-fit and re-position so the
+        # panel grows downward without shifting the toggle.
+        self.adjustSize()
+        self._track()
+
+    def _collect_use_state(self) -> dict[str, bool]:
+        """Snapshot the current use-flag of each tracked item."""
+        s = self._settings
+        out: dict[str, bool] = {}
+        if s is None:
+            return out
+        out["__pk__"] = bool(getattr(s.pk, "use", False))
+        out["__potion__"] = bool(getattr(s.potion, "use", False))
+        for sid, slot in getattr(s, "slots", {}).items():
+            out[f"slot:{sid}"] = bool(slot.use)
+        return out
+
+    def _on_external_refresh(self) -> None:
+        """Called from bus.slot_state_refresh / settings_dirty.
+
+        Detects a True→False transition on any tracked item and
+        auto-opens the panel so the user notices. Always rebuilds the
+        panel's rows if it's currently open.
+        """
+        cur = self._collect_use_state()
+        auto_off = False
+        for key, was in self._prev_use.items():
+            if was and not cur.get(key, False):
+                auto_off = True
+                break
+        self._prev_use = cur
+        if auto_off:
+            self.set_panel_open(True)
+        elif self._panel.isVisible():
+            self._rebuild_panel()
+
+    def _rebuild_panel(self) -> None:
+        """Drop every existing row, then re-add PK + potion + each
+        currently-use=True slot."""
+        # Clear existing
+        while self._panel_layout.count():
+            item = self._panel_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        s = self._settings
+        if s is None:
+            return
+
+        # PK
+        self._add_row("PK", bool(s.pk.use),
+                       lambda v: self._set_pk(bool(v)))
+        # Potion
+        self._add_row("물약", bool(s.potion.use),
+                       lambda v: self._set_potion(bool(v)))
+        # Slots — show use=True only, plus any that the auto-off
+        # detector flipped False in the snapshot diff so the user
+        # can re-enable them right here.
+        cur = self._collect_use_state()
+        previously_on = {
+            k for k, was in self._prev_use.items() if was and k.startswith("slot:")
+        }
+        for sid, slot in getattr(s, "slots", {}).items():
+            key = f"slot:{sid}"
+            if cur.get(key) or key in previously_on:
+                label = slot.label or f"슬롯-{sid}"
+                self._add_row(label, bool(slot.use),
+                                lambda v, _sid=sid: self._set_slot(_sid, bool(v)))
+
+    def _add_row(self, label_text: str, state: bool,
+                  on_toggle) -> None:
+        row = QWidget(self._panel)
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        lbl = QLabel(label_text)
+        lbl.setStyleSheet(
+            f"color:{'#cfd6e2' if state else '#7f8694'}; padding:0 2px;"
+        )
+        f = QFont(); f.setPointSize(9); lbl.setFont(f)
+        lbl.setMinimumWidth(LABEL_MIN_W)
+        h.addWidget(lbl, 1)
+        tgl = IOSToggle(width=ROW_TOGGLE_W, height=ROW_TOGGLE_H, parent=row)
+        tgl.set_state(state)
+        tgl.toggled.connect(on_toggle)
+        h.addWidget(tgl)
+        self._panel_layout.addWidget(row)
+
+    # ───────── settings writes ─────────
+    def _set_pk(self, on: bool) -> None:
+        if self._settings is None:
+            return
+        if bool(self._settings.pk.use) == on:
+            return
+        self._settings.pk.use = on
+        self._broadcast_change()
+
+    def _set_potion(self, on: bool) -> None:
+        if self._settings is None:
+            return
+        if bool(self._settings.potion.use) == on:
+            return
+        self._settings.potion.use = on
+        self._broadcast_change()
+
+    def _set_slot(self, sid: str, on: bool) -> None:
+        s = self._settings
+        if s is None or sid not in s.slots:
+            return
+        if bool(s.slots[sid].use) == on:
+            return
+        s.slots[sid].use = on
+        self._broadcast_change()
+
+    def _broadcast_change(self) -> None:
+        """Emit the same signals an in-app toggle would so the rest
+        of the UI (main iOS toggles in combat / slots sections) stays
+        in lockstep with what the floater just did."""
+        if self._suppress_emit:
+            return
+        try:
+            from quickcast.ui.design.signals import bus
+            self._suppress_emit = True
+            bus.settings_dirty.emit()
+            bus.slot_state_refresh.emit()
+        finally:
+            self._suppress_emit = False
+        # Update our snapshot so the next external refresh doesn't
+        # mistake our own write for an auto-off event.
+        self._prev_use = self._collect_use_state()
+
     # ───────── window tracking ─────────
     def _track(self) -> None:
         if self._target_hwnd is None:
             return
-        # While the user is dragging, the tracker MUST NOT yank the floater
-        # back to its anchor — that's what produced the flicker. Wait until
-        # mouse release, then re-anchor from the new position.
         if self._dragging:
             return
         if not is_window_alive(self._target_hwnd):
-            # Window died (game closed / restarted). Don't detach() —
-            # that stops the tracker and forgets we're supposed to be
-            # ON. Just hide and keep polling so the AppWindow auto-find
-            # signal (game_window_found) can re-attach us seamlessly.
             self._target_hwnd = None
             self.hide()
             return
@@ -169,9 +380,6 @@ class FloatingSwitch(QWidget):
         if rect is None:
             return
         if self._user_offset is None:
-            # Default anchor: top-right of the client area, but pushed
-            # down by ONE floater height so we don't overlap the in-game
-            # menu strip (which sits at the very top of the client).
             tx = rect.right - self.width() - 8
             ty = rect.top + 8 + self.height()
         else:
@@ -180,13 +388,12 @@ class FloatingSwitch(QWidget):
         if (self.x(), self.y()) != (tx, ty):
             self.move(tx, ty)
 
-    # ───────── drag handlers (driven by _DragHandle) ─────────
+    # ───────── drag handlers ─────────
     def _on_drag_start(self, _global_pos: QPoint) -> None:
         self._drag_origin = self.pos()
         self._dragging = True
 
     def _on_drag_move(self, global_pos: QPoint) -> None:
-        # Move the floater so the handle stays under the cursor
         new_x = global_pos.x() - self.handle.x() - self.handle.width() // 2
         new_y = global_pos.y() - self.handle.y() - self.handle.height() // 2
         self.move(new_x, new_y)
@@ -209,7 +416,9 @@ class FloatingSwitch(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(QColor(20, 25, 40, 220)))
-        radius = self.height() / 2.0
+        # Squarish corners when the expand panel is open, pill when
+        # only the top bar is showing.
+        radius = 12.0 if self._panel.isVisible() else self.height() / 2.0
         p.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), radius, radius)
 
 

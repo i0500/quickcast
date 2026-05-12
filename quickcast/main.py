@@ -287,6 +287,12 @@ def run() -> None:
     # toggle: clicking the floater flips master, and master flips it.
     from quickcast.ui.floating_switch import FloatingSwitch
     floater = FloatingSwitch()
+    # Two-way sync with the live settings instance: panel toggles
+    # write back to mock_settings + emit bus signals so the main UI
+    # mirrors instantly, and external changes (UI clicks, macro
+    # auto-disabling a one-shot slot) trigger panel rebuilds + the
+    # auto-expand response.
+    floater.attach_settings(settings)
     def _on_floater_toggled(on: bool) -> None:
         if on:
             target_hwnd = getattr(controller, "_auto_hwnd", 0)
