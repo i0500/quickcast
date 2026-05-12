@@ -62,41 +62,45 @@ class OcrResult:
     confidence: float
 
 
-def _binarise(roi_bgra: np.ndarray) -> np.ndarray:
+def _binarise(roi_bgra: np.ndarray,
+                threshold: Optional[int] = None) -> np.ndarray:
     """Return a uint8 (H, W) mask where bright text pixels are 255.
 
-    Uses a brightness percentile threshold rather than a fixed value so
-    the same code works on dim minimaps and bright bar overlays without
-    per-element tuning. The HUD's text contrasts strongly with the
-    background, so the brightest ~25% of pixels reliably hits the text.
+    ``threshold`` (0..255) lets callers override the auto-picked value
+    from the calibration UI — when the user slides it they get to see
+    segmentation update in real-time. ``None`` means "auto": use the
+    75th-percentile brightness, clamped to ≥140 so empty/dim frames
+    don't produce a noise-driven mask.
     """
     if roi_bgra.ndim == 3:
         gray = cv2.cvtColor(roi_bgra[:, :, :3], cv2.COLOR_BGR2GRAY)
     else:
         gray = roi_bgra
-    # 75th percentile is a safe starting point — most HUD fields have
-    # less than 25% of pixels covered by text glyphs. Clamp to a sensible
-    # minimum so completely empty / very dark frames don't produce a
-    # noise-driven mask.
-    thr = max(int(np.percentile(gray, 75)), 140)
+    if threshold is None:
+        thr = max(int(np.percentile(gray, 75)), 140)
+    else:
+        thr = int(max(0, min(255, threshold)))
     _, mask = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
     return mask
 
 
 def segment_glyphs(roi_bgra: np.ndarray,
                      min_glyph_w: int = 2,
-                     min_glyph_h: int = 4) -> list[tuple[int, int, int, int]]:
+                     min_glyph_h: int = 4,
+                     threshold: Optional[int] = None,
+                     ) -> list[tuple[int, int, int, int]]:
     """Find bounding boxes for each glyph in a HUD text ROI.
 
     Returns a list of ``(x, y, w, h)`` boxes, left-to-right. Boxes are
     in ROI-local coordinates. Empty list ⇒ no glyphs detected (likely
-    a bad ROI or no text present).
+    a bad ROI or no text present). ``threshold`` overrides the auto
+    binarisation percentile when the calibration UI exposes a slider.
 
     Algorithm: binarise → vertical-projection profile → runs of >0
     foreground pixels delimit glyph columns. Each column run is then
     cropped vertically to the foreground extent for that glyph.
     """
-    mask = _binarise(roi_bgra)
+    mask = _binarise(roi_bgra, threshold=threshold)
     h, w = mask.shape
     if h == 0 or w == 0:
         return []

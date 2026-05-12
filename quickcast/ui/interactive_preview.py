@@ -32,6 +32,15 @@ ROI_DEFS = [
     ("potion", "POTION", QColor( 76, 175,  80)),   # green
 ]
 
+# OCR text-region ROIs. Only painted / hit-tested when settings.ocr_mode
+# is True so they don't clutter the default view. Lighter shades so the
+# user can visually distinguish them from the primary HUD boxes above.
+OCR_ROI_DEFS = [
+    ("hp_text",     "HP 텍스트",     QColor(255, 145, 145)),   # light red
+    ("mp_text",     "MP 텍스트",     QColor(130, 195, 255)),   # light blue
+    ("potion_text", "물약 텍스트",   QColor(170, 220, 170)),   # light green
+]
+
 
 @dataclass
 class _RoiRect:
@@ -94,6 +103,10 @@ class InteractivePreview(QWidget):
         self._grace_remaining: float = 0.0
         from quickcast.ui.design.signals import bus as _bus
         _bus.master_grace_changed.connect(self._on_grace_changed)
+        # OCR-mode toggle / text ROI edits change which boxes are visible,
+        # so repaint whenever settings flips. Cheap — paintEvent reads
+        # live values on each call already.
+        _bus.settings_dirty.connect(self.update)
 
         self.setMouseTracking(True)
         self.setMinimumHeight(280)
@@ -120,6 +133,15 @@ class InteractivePreview(QWidget):
         if roi_id == "potion":
             return _RoiRect(s.potion.cap.x, s.potion.cap.y,
                             s.potion.cap_w, s.potion.cap_h)
+        if roi_id == "hp_text":
+            return _RoiRect(s.hp_text_cap.x, s.hp_text_cap.y,
+                            s.hp_text_cap_w, s.hp_text_cap_h)
+        if roi_id == "mp_text":
+            return _RoiRect(s.mp_text_cap.x, s.mp_text_cap.y,
+                            s.mp_text_cap_w, s.mp_text_cap_h)
+        if roi_id == "potion_text":
+            return _RoiRect(s.potion_text_cap.x, s.potion_text_cap.y,
+                            s.potion_text_cap_w, s.potion_text_cap_h)
         raise KeyError(roi_id)
 
     def _set_roi(self, roi_id: str, r: _RoiRect) -> None:
@@ -149,6 +171,15 @@ class InteractivePreview(QWidget):
         elif roi_id == "potion":
             s.potion.cap = Point(x=cx, y=cy)
             s.potion.cap_w, s.potion.cap_h = w, h
+        elif roi_id == "hp_text":
+            s.hp_text_cap = Point(x=cx, y=cy)
+            s.hp_text_cap_w, s.hp_text_cap_h = w, h
+        elif roi_id == "mp_text":
+            s.mp_text_cap = Point(x=cx, y=cy)
+            s.mp_text_cap_w, s.mp_text_cap_h = w, h
+        elif roi_id == "potion_text":
+            s.potion_text_cap = Point(x=cx, y=cy)
+            s.potion_text_cap_w, s.potion_text_cap_h = w, h
         self.roi_changed.emit(roi_id)
 
     # ───────── frame updates ─────────
@@ -227,12 +258,22 @@ class InteractivePreview(QWidget):
     # all four ROI sizes are user-resizable. Empty tuple = nothing locked.
     _SIZE_LOCKED_IDS: tuple[str, ...] = ()
 
+    def _active_roi_defs(self) -> list[tuple[str, str, QColor]]:
+        """Primary ROIs always; OCR text ROIs only when ocr_mode is on."""
+        defs = list(ROI_DEFS)
+        if getattr(self.settings, "ocr_mode", False):
+            defs.extend(OCR_ROI_DEFS)
+        return defs
+
     def _hit_test(self, fx: int, fy: int) -> tuple[Optional[str], int]:
         """Return (roi_id, hit_zone) for the topmost matching ROI under (fx, fy)."""
         # Iterate in reverse so larger-drawn-last ROIs win — but our ROIs are
         # all small so order barely matters. Prefer edges over interiors.
-        for roi_id, _label, _col in reversed(ROI_DEFS):
+        for roi_id, _label, _col in reversed(self._active_roi_defs()):
             r = self._get_roi(roi_id)
+            # Skip ROIs that aren't actually drawn (zero-size text ROIs).
+            if roi_id.endswith("_text") and (r.w <= 0 or r.h <= 0):
+                continue
             on_left = abs(fx - r.x) <= _EDGE_PX
             on_right = abs(fx - (r.x + r.w)) <= _EDGE_PX
             on_top = abs(fy - r.y) <= _EDGE_PX
@@ -439,8 +480,17 @@ class InteractivePreview(QWidget):
         self._label_rects.clear()
 
         # Pass 1: rectangles + edge ticks
+        active_defs = self._active_roi_defs()
         rect_widget: dict[str, QRect] = {}
-        for roi_id, _label, color in ROI_DEFS:
+        # Drop OCR text ROIs whose dimensions are 0 (user hasn't run
+        # auto-detect or dragged them yet) — drawing a zero-size box
+        # produces a confusing pixel-sized dot at the origin.
+        active_defs = [
+            (rid, lab, col) for (rid, lab, col) in active_defs
+            if not rid.endswith("_text") or
+            (self._get_roi(rid).w > 0 and self._get_roi(rid).h > 0)
+        ]
+        for roi_id, _label, color in active_defs:
             r = self._get_roi(roi_id)
             tl = self._frame_to_widget(r.x, r.y)
             br = self._frame_to_widget(r.x + r.w, r.y + r.h)
@@ -469,6 +519,9 @@ class InteractivePreview(QWidget):
             "mp": ("right", "below", "above", "left"),
             "pk": ("above", "left", "below", "right"),
             "potion": ("above", "right", "below", "left"),
+            "hp_text": ("right", "below", "above", "left"),
+            "mp_text": ("right", "below", "above", "left"),
+            "potion_text": ("above", "right", "below", "left"),
         }
         widget_rect = QRect(0, 0, self.width(), self.height())
 
@@ -482,7 +535,7 @@ class InteractivePreview(QWidget):
             return QRect(around.left(), around.bottom() + 2, sz_w, sz_h)  # below
 
         placed: list[QRect] = []
-        for roi_id, label, color in ROI_DEFS:
+        for roi_id, label, color in active_defs:
             text = self._roi_value_text.get(roi_id) or label
             tw = p.fontMetrics().horizontalAdvance(text) + 12
             th = p.fontMetrics().height() + 4

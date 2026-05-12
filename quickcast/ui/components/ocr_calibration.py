@@ -32,8 +32,8 @@ import numpy as np
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QImage, QPainter, QPen, QPixmap, QColor
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QSlider, QVBoxLayout, QWidget,
 )
 
 from quickcast.core.ocr import segment_glyphs, _binarise
@@ -44,30 +44,60 @@ _DISPLAY_SCALE = 4    # pixel zoom — small HUD glyphs are 8-12 px tall
 
 
 class _RoiCanvas(QWidget):
-    """Renders the upscaled ROI + glyph box overlays."""
+    """Renders the upscaled ROI + glyph box overlays.
+
+    ``threshold`` (0..255 or None) controls the binarisation cutoff used
+    for segmentation; ``show_binarised`` swaps the background between
+    the original image and the white/black mask so the user can see
+    exactly what the segmenter sees.
+    """
 
     def __init__(self, roi_bgra: np.ndarray, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.roi = roi_bgra
         h, w = roi_bgra.shape[:2]
         self.setFixedSize(QSize(w * _DISPLAY_SCALE, h * _DISPLAY_SCALE))
-        self.boxes: list[tuple[int, int, int, int]] = segment_glyphs(roi_bgra)
+        self.threshold: Optional[int] = None    # None ⇒ auto percentile
+        self.show_binarised: bool = False
+        self.boxes: list[tuple[int, int, int, int]] = []
+        self.refresh_boxes()
+
+    def set_threshold(self, value: Optional[int]) -> None:
+        self.threshold = value
+        self.refresh_boxes()
+
+    def set_show_binarised(self, on: bool) -> None:
+        self.show_binarised = bool(on)
+        self.update()
 
     def refresh_boxes(self) -> None:
-        self.boxes = segment_glyphs(self.roi)
+        self.boxes = segment_glyphs(self.roi, threshold=self.threshold)
         self.update()
 
     def paintEvent(self, _e) -> None:
+        from quickcast.core.ocr import _binarise
         if self.roi is None or self.roi.size == 0:
             return
         p = QPainter(self)
-        # Convert BGRA → QImage (Qt expects ARGB32 byte order on little-
-        # endian; mss/PrintWindow already produce BGRA so this maps 1:1).
         h, w = self.roi.shape[:2]
-        if self.roi.flags["C_CONTIGUOUS"]:
-            buf = self.roi
+
+        # Pick the background image: raw frame or the binarised mask
+        # that the segmenter actually sees. Either way upscale to the
+        # display size with nearest-neighbour for crisp pixel edges.
+        if self.show_binarised:
+            mask = _binarise(self.roi, threshold=self.threshold)
+            # Convert single-channel mask to BGRA for QImage.
+            bgra = np.zeros((h, w, 4), dtype=np.uint8)
+            bgra[..., 0] = mask
+            bgra[..., 1] = mask
+            bgra[..., 2] = mask
+            bgra[..., 3] = 255
+            buf = np.ascontiguousarray(bgra)
         else:
-            buf = np.ascontiguousarray(self.roi)
+            if self.roi.flags["C_CONTIGUOUS"]:
+                buf = self.roi
+            else:
+                buf = np.ascontiguousarray(self.roi)
         qimg = QImage(buf.data, w, h, w * 4, QImage.Format_ARGB32)
         pm = QPixmap.fromImage(qimg).scaled(
             w * _DISPLAY_SCALE, h * _DISPLAY_SCALE,
@@ -108,8 +138,8 @@ class OcrCalibrationDialog(QDialog):
 
         info = QLabel(
             "아래 이미지는 캡쳐된 텍스트 영역입니다.\n"
-            "초록 박스는 자동 검출된 글자입니다 — 박스 위 번호 순서대로\n"
-            "정답을 입력해주세요. 예: 1234/5678 또는 0"
+            "초록 박스가 글자별로 깔끔히 나뉠 때까지 임계값을 조절해주세요.\n"
+            "박스 개수가 정답 글자 수와 같아지면 [저장]이 활성화됩니다."
         )
         info.setWordWrap(True)
         v.addWidget(info)
@@ -119,6 +149,31 @@ class OcrCalibrationDialog(QDialog):
         self._canvas = _RoiCanvas(roi_bgra, self)
         canvas_row.addWidget(self._canvas); canvas_row.addStretch(1)
         v.addLayout(canvas_row)
+
+        # ── Threshold slider + binarised-preview toggle ──
+        thr_row = QHBoxLayout(); thr_row.setSpacing(8)
+        thr_label = QLabel("임계값 (자동)")
+        thr_label.setMinimumWidth(110)
+        self._thr_slider = QSlider(Qt.Horizontal)
+        self._thr_slider.setRange(0, 255)
+        # 0 == "auto" sentinel. Start there so first paint uses auto.
+        self._thr_slider.setValue(0)
+
+        def _on_thr(v: int) -> None:
+            if v <= 0:
+                thr_label.setText("임계값 (자동)")
+                self._canvas.set_threshold(None)
+            else:
+                thr_label.setText(f"임계값 {v}")
+                self._canvas.set_threshold(int(v))
+            self._refresh_state()
+        self._thr_slider.valueChanged.connect(_on_thr)
+        thr_row.addWidget(thr_label); thr_row.addWidget(self._thr_slider, 1)
+
+        self._show_bin = QCheckBox("이진화 보기")
+        self._show_bin.toggled.connect(self._canvas.set_show_binarised)
+        thr_row.addWidget(self._show_bin)
+        v.addLayout(thr_row)
 
         # Detected count line
         self._count_lbl = QLabel("")
@@ -190,9 +245,12 @@ class OcrCalibrationDialog(QDialog):
         # passes (HP then MP) accumulate templates instead of replacing.
         existing = load_templates()
         new_templates: dict[str, np.ndarray] = dict(existing)
+        # Use the same threshold the user saw on screen so the saved
+        # templates match what segmentation will produce at inference.
+        thr_val = self._canvas.threshold
         for ch, (x, y, w, h) in zip(text, boxes):
             crop = self._roi[y : y + h, x : x + w]
-            mask = _binarise(crop)
+            mask = _binarise(crop, threshold=thr_val)
             # Trim to actual foreground in case binarisation produced
             # padded margins (slight overhang of the segment box).
             ys = np.where(mask.any(axis=1))[0]
