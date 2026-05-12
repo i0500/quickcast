@@ -513,6 +513,12 @@ class InteractivePreview(QWidget):
             if not rid.endswith("_text") or
             (self._get_roi(rid).w > 0 and self._get_roi(rid).h > 0)
         ]
+        # Draw small / icon-template ROIs LAST so they end up on top of
+        # the larger HUD text rectangles — at 25×25 (PK) and 13×13
+        # (POTION) they otherwise visually disappear under a bigger
+        # text region that happens to overlap.
+        active_defs.sort(key=lambda d: 1 if d[0] in ("pk", "potion") else 0)
+
         for roi_id, _label, color in active_defs:
             r = self._get_roi(roi_id)
             tl = self._frame_to_widget(r.x, r.y)
@@ -520,18 +526,37 @@ class InteractivePreview(QWidget):
             wrect = QRect(tl, br)
             rect_widget[roi_id] = wrect
 
-            p.setPen(QPen(color, 1)); p.setBrush(Qt.NoBrush)
+            # Small icon ROIs (PK / POTION) get a thicker stroke + corner
+            # markers so they're visible against the game background even
+            # at the preview's down-scaled resolution.
+            is_small = roi_id in ("pk", "potion")
+            stroke = 2 if is_small else 1
+            p.setPen(QPen(color, stroke)); p.setBrush(Qt.NoBrush)
             p.drawRect(wrect)
-            # Subtle edge midpoint ticks (no corner dots)
-            p.setPen(QPen(color, 2))
-            mids = [
-                ((wrect.left() + wrect.right()) // 2, wrect.top()),
-                ((wrect.left() + wrect.right()) // 2, wrect.bottom()),
-                (wrect.left(), (wrect.top() + wrect.bottom()) // 2),
-                (wrect.right(), (wrect.top() + wrect.bottom()) // 2),
-            ]
-            for mx, my in mids:
-                p.drawPoint(mx, my)
+            if is_small:
+                # 4-pixel solid corner squares mark the box edges plainly.
+                p.setBrush(color)
+                p.setPen(Qt.NoPen)
+                sz = 4
+                for cx, cy in (
+                    (wrect.left(), wrect.top()),
+                    (wrect.right() - sz, wrect.top()),
+                    (wrect.left(), wrect.bottom() - sz),
+                    (wrect.right() - sz, wrect.bottom() - sz),
+                ):
+                    p.drawRect(cx, cy, sz, sz)
+                p.setBrush(Qt.NoBrush)
+            else:
+                # Subtle edge midpoint ticks for the larger boxes.
+                p.setPen(QPen(color, 2))
+                mids = [
+                    ((wrect.left() + wrect.right()) // 2, wrect.top()),
+                    ((wrect.left() + wrect.right()) // 2, wrect.bottom()),
+                    (wrect.left(), (wrect.top() + wrect.bottom()) // 2),
+                    (wrect.right(), (wrect.top() + wrect.bottom()) // 2),
+                ]
+                for mx, my in mids:
+                    p.drawPoint(mx, my)
 
         # Pass 2: labels — placed outside each ROI in a side that minimises
         # overlap with the other ROIs.
