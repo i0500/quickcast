@@ -264,7 +264,19 @@ def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
     The template is height-matched to the glyph (width scales
     proportionally). When the resulting width differs from the
     glyph's, we pad / centre-crop so cv2.matchTemplate sees equal
-    sized inputs. Negative score on any failure.
+    sized inputs.
+
+    Plus an **aspect-ratio penalty**: matchTemplate happily produces
+    a high TM_CCOEFF_NORMED for a wide template (e.g. "0") against
+    a narrow glyph (e.g. "5") because the pad/crop step blanks out
+    the mismatched columns before comparison. So a tall-skinny "5"
+    in the wild gets scored decently against a fat "0" template and
+    "0" wins by default. We deflate the score proportionally to the
+    aspect-ratio mismatch so similarly-shaped glyphs beat anchor
+    glyphs with the wrong proportions. Penalty floors at 0.5 so a
+    moderate mismatch doesn't completely kill the signal.
+
+    Negative score on any failure.
     """
     gh, gw = glyph_mask.shape
     if gh == 0 or gw == 0:
@@ -296,7 +308,19 @@ def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
         _, max_val, _, _ = cv2.minMaxLoc(result)
     except cv2.error:
         return -1.0
-    return float(max_val)
+    # Aspect penalty: compare native template width vs glyph width
+    # (after height-match). Big difference ⇒ shape mismatch, downweight
+    # quadratically so a "0" template doesn't drift over to claiming
+    # narrow "5"-shaped glyphs.
+    #
+    # Linear penalty (the first version) only dropped a 70%-width
+    # mismatch to 0.7× — still high enough that "0" beat the right
+    # glyph on under-trained sets. Quadratic drops the same case to
+    # ~0.49, with a 0.2 floor so heavily-mismatched edge cases keep
+    # a tiny signal rather than disappearing entirely.
+    width_ratio = min(gw, new_w) / max(gw, new_w)
+    penalty = max(0.2, width_ratio * width_ratio)
+    return float(max_val) * penalty
 
 
 def _best_label(glyph_mask: np.ndarray,
