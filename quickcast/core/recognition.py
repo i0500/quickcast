@@ -289,22 +289,57 @@ class Recognizer:
         # Throttle the per-frame potion-OCR debug log to once per ~2s
         # so a 10 fps capture loop doesn't drown the log card.
         self._last_potion_dbg_at = 0.0
-        # Digit templates for the OCR path. Loaded lazily so a fresh
-        # install that hasn't trained yet doesn't pay the disk hit on
-        # every analyse() call. reload_digits() refreshes from disk
-        # whenever the learner saves a new set.
-        self._digit_templates: dict[str, list[np.ndarray]] = {}
+        # Per-domain digit templates + canonical sizes.
+        # Structure: { "hp": {"0": [mask, …], …}, "mp": {...}, "potion": {...} }
+        # A "legacy" entry holds the pre-domain global pool (digits/*.png) so
+        # users who trained before the split keep working until they
+        # re-train per domain.
+        self._digit_templates: dict[str, dict[str, list[np.ndarray]]] = {
+            "hp": {}, "mp": {}, "potion": {}, "legacy": {},
+        }
+        self._digit_canonical: dict[str, Optional[tuple[int, int]]] = {
+            "hp": None, "mp": None, "potion": None, "legacy": None,
+        }
         self.reload_digits()
 
     def reload_digits(self) -> None:
-        """Re-read digit templates from disk. Safe to call repeatedly."""
+        """Re-read digit templates from disk. Safe to call repeatedly.
+
+        Loads each domain's pool plus the legacy global pool, and pulls
+        each domain's canonical (W, H) for the per-domain normalised
+        matchTemplate path in ocr._score_against.
+        """
         try:
-            from quickcast.core.digit_store import load_templates
-            self._digit_templates = load_templates()
+            from quickcast.core.digit_store import (
+                load_templates, read_canonical,
+            )
+            for d in ("hp", "mp", "potion"):
+                self._digit_templates[d] = load_templates(domain=d)
+                self._digit_canonical[d] = read_canonical(domain=d)
+            self._digit_templates["legacy"] = load_templates(domain=None)
+            self._digit_canonical["legacy"] = None
         except Exception:
             from quickcast.utils.logger import logger
             logger.exception("digit templates reload failed")
-            self._digit_templates = {}
+            for d in self._digit_templates:
+                self._digit_templates[d] = {}
+                self._digit_canonical[d] = None
+
+    def _templates_for(self, domain: str) -> tuple[
+        dict[str, list[np.ndarray]], Optional[tuple[int, int]]
+    ]:
+        """Pick the templates + canonical to use for a domain.
+
+        Prefers the domain-specific pool when it's been trained;
+        falls back to the legacy global pool (with no canonical, so
+        the legacy path runs) when the domain is empty. Returning
+        empty dict signals "no templates trained anywhere yet" —
+        recognition.analyze() then skips OCR for that field.
+        """
+        tpl = self._digit_templates.get(domain) or {}
+        if tpl:
+            return tpl, self._digit_canonical.get(domain)
+        return self._digit_templates.get("legacy", {}), None
 
     @staticmethod
     def _load_bgra(path: Path) -> Optional[np.ndarray]:
@@ -360,7 +395,11 @@ class Recognizer:
         ocr_mp: Optional[int] = None
         ocr_potion_empty: Optional[bool] = None
         ocr_potion_score: float = 0.0
-        ocr_active = bool(getattr(settings, "ocr_mode", False) and self._digit_templates)
+        # OCR active when the mode is on AND at least one domain (or
+        # the legacy pool) has any trained templates.
+        ocr_active = bool(getattr(settings, "ocr_mode", False)) and any(
+            self._digit_templates.get(d) for d in ("hp", "mp", "potion", "legacy")
+        )
         if ocr_active:
             from quickcast.core.ocr import recognise, hp_percentage
             # Use the same threshold the user learned with — 0 means
@@ -370,33 +409,44 @@ class Recognizer:
             ocr_thr = ocr_thr_raw if ocr_thr_raw > 0 else None
             # HP
             if settings.hp_text_cap_w > 0 and settings.hp_text_cap_h > 0:
-                hp_text_roi = frame.crop(
-                    settings.hp_text_cap,
-                    settings.hp_text_cap_w, settings.hp_text_cap_h,
-                )
-                r = recognise(hp_text_roi, self._digit_templates,
-                                threshold=ocr_thr)
-                ocr_hp = hp_percentage(r)
+                tpl, canon = self._templates_for("hp")
+                if tpl:
+                    hp_text_roi = frame.crop(
+                        settings.hp_text_cap,
+                        settings.hp_text_cap_w, settings.hp_text_cap_h,
+                    )
+                    r = recognise(hp_text_roi, tpl, threshold=ocr_thr,
+                                    canonical=canon)
+                    ocr_hp = hp_percentage(r)
             # MP
             if settings.mp_text_cap_w > 0 and settings.mp_text_cap_h > 0:
-                mp_text_roi = frame.crop(
-                    settings.mp_text_cap,
-                    settings.mp_text_cap_w, settings.mp_text_cap_h,
-                )
-                r = recognise(mp_text_roi, self._digit_templates,
-                                threshold=ocr_thr)
-                ocr_mp = hp_percentage(r)
+                tpl, canon = self._templates_for("mp")
+                if tpl:
+                    mp_text_roi = frame.crop(
+                        settings.mp_text_cap,
+                        settings.mp_text_cap_w, settings.mp_text_cap_h,
+                    )
+                    r = recognise(mp_text_roi, tpl, threshold=ocr_thr,
+                                    canonical=canon)
+                    ocr_mp = hp_percentage(r)
             # Potion — single-number field; 0 == empty.
             # Confidence threshold lowered to 0.45 (was 0.55) because a
             # single-glyph counter is harder to match cleanly than a
             # full "cur/max" string, and 0.55 was rejecting valid hits.
             if settings.potion_text_cap_w > 0 and settings.potion_text_cap_h > 0:
-                po_text_roi = frame.crop(
-                    settings.potion_text_cap,
-                    settings.potion_text_cap_w, settings.potion_text_cap_h,
-                )
-                r = recognise(po_text_roi, self._digit_templates,
-                                threshold=ocr_thr)
+                tpl_po, canon_po = self._templates_for("potion")
+                if not tpl_po:
+                    r = None
+                else:
+                    po_text_roi = frame.crop(
+                        settings.potion_text_cap,
+                        settings.potion_text_cap_w, settings.potion_text_cap_h,
+                    )
+                    r = recognise(po_text_roi, tpl_po, threshold=ocr_thr,
+                                    canonical=canon_po)
+            else:
+                r = None
+            if r is not None:
                 # Throttled diagnostic at INFO level so it lands in the
                 # dashboard log card — the user needs to actually see
                 # what OCR is reading to debug "0으로만 인식" reports.

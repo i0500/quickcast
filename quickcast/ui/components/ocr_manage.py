@@ -1,15 +1,12 @@
 """OCR 학습 관리 — review per-glyph instance counts and prune.
 
-Lets the user see how many saved instances each glyph has (0..9, '/')
-and either:
+Now per-domain (HP / MP / potion). Each domain has its own glyph
+pool under digits/<domain>/<label>/, so the dialog walks every
+trained domain and groups the rows by domain. Per-row delete +
+per-domain "전체 초기화" buttons.
 
-- zap one glyph's entire training set (e.g. "0" got polluted by a bad
-  calibration pass and is now confused with "8"), or
-- nuke the whole digit store and start fresh.
-
-Changes go straight to disk via core.digit_store, and we emit
-``bus.digit_templates_changed`` on close so the live recognizer reloads
-its in-memory templates without an app restart.
+Closes via accept() and emits ``bus.digit_templates_changed`` if
+anything actually changed so the live recognizer reloads.
 """
 from __future__ import annotations
 
@@ -27,12 +24,21 @@ from quickcast.core.ocr import GLYPHS
 from quickcast.ui.design.signals import bus
 
 
+_DOMAIN_TITLES = {
+    "hp": "HP",
+    "mp": "MP",
+    "potion": "물약",
+    "legacy": "구버전 통합",
+}
+
+
 class OcrManageDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("OCR 학습 관리")
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
+        self.setMinimumHeight(540)
 
         self._dirty = False
 
@@ -40,8 +46,9 @@ class OcrManageDialog(QDialog):
         v.setSpacing(10)
 
         hdr = QLabel(
-            "학습된 글자별 누적 샘플 수입니다. 인식이 안 되거나 잘못 잡히는 글자는\n"
-            "[지우기]로 초기화하고 다시 학습하면 깔끔해집니다."
+            "영역별로 학습된 글자 instance를 관리합니다. 인식이 안 되거나\n"
+            "잘못 잡히는 글자는 그 영역에서 [지우기]로 초기화하고 다시\n"
+            "학습하면 깨끗해집니다. 영역끼리는 서로 영향을 주지 않습니다."
         )
         hdr.setWordWrap(True)
         v.addWidget(hdr)
@@ -51,21 +58,17 @@ class OcrManageDialog(QDialog):
         body = QWidget()
         self._body_layout = QVBoxLayout(body)
         self._body_layout.setContentsMargins(0, 0, 0, 0)
-        self._body_layout.setSpacing(4)
+        self._body_layout.setSpacing(10)
         scroll.setWidget(body)
         v.addWidget(scroll, 1)
 
-        # Footer buttons
-        ft = QHBoxLayout(); ft.setSpacing(8)
-        self._clear_all = QPushButton("전체 초기화")
-        self._clear_all.clicked.connect(self._on_clear_all)
-        ft.addWidget(self._clear_all); ft.addStretch(1)
+        ft = QHBoxLayout(); ft.setSpacing(8); ft.addStretch(1)
         close = QPushButton("닫기"); close.clicked.connect(self.accept)
         close.setDefault(True)
         ft.addWidget(close)
         v.addLayout(ft)
 
-        self._refresh_rows()
+        self._refresh_all()
 
     # ───────── rendering ─────────
     def _clear_layout(self) -> None:
@@ -75,64 +78,100 @@ class OcrManageDialog(QDialog):
             if w is not None:
                 w.setParent(None)
 
-    def _refresh_rows(self) -> None:
+    def _refresh_all(self) -> None:
         self._clear_layout()
-        counts = digit_store.instance_counts()
-        total = sum(counts.values())
-        # Header summary
-        sf = QFont(); sf.setBold(True)
-        summary = QLabel(f"총 {total}개 샘플")
-        summary.setFont(sf)
-        self._body_layout.addWidget(summary)
+        for domain in ("hp", "mp", "potion", "legacy"):
+            counts = digit_store.instance_counts(domain=None if domain == "legacy" else domain)
+            canon = digit_store.read_canonical(domain=None if domain == "legacy" else domain)
+            total = sum(counts.values())
+            # Skip the legacy bucket entirely when it's empty — most
+            # fresh installs will have nothing there and the row would
+            # just be visual noise.
+            if domain == "legacy" and total == 0:
+                continue
+            self._body_layout.addWidget(self._build_domain_block(
+                domain, counts, total, canon,
+            ))
+        self._body_layout.addStretch(1)
 
-        # One row per known glyph (always show all 11 — 0 count for un-trained)
+    def _build_domain_block(self, domain: str,
+                              counts: dict[str, int],
+                              total: int,
+                              canon: Optional[tuple[int, int]]) -> QWidget:
+        wrap = QWidget()
+        col = QVBoxLayout(wrap); col.setContentsMargins(8, 6, 8, 6); col.setSpacing(4)
+
+        # Domain header row
+        head = QHBoxLayout(); head.setSpacing(8)
+        title = QLabel(_DOMAIN_TITLES.get(domain, domain))
+        f = QFont(); f.setBold(True); f.setPointSize(12); title.setFont(f)
+        head.addWidget(title)
+        sub_bits: list[str] = [f"총 {total}개"]
+        if canon:
+            sub_bits.append(f"기준 크기 {canon[0]}×{canon[1]}")
+        sub = QLabel(" · ".join(sub_bits))
+        sub.setStyleSheet("color:#888;")
+        head.addWidget(sub); head.addStretch(1)
+        wipe = QPushButton("전체 초기화")
+        wipe.setFixedHeight(24)
+        wipe.setEnabled(total > 0)
+        wipe.clicked.connect(lambda _=False, d=domain: self._on_clear_domain(d))
+        head.addWidget(wipe)
+        col.addLayout(head)
+
+        # Glyph rows
         for label in GLYPHS:
-            row = QWidget()
-            h = QHBoxLayout(row); h.setContentsMargins(0, 2, 0, 2); h.setSpacing(8)
+            row = QHBoxLayout(); row.setContentsMargins(0, 2, 0, 2); row.setSpacing(8)
             display = "/" if label == "/" else label
-            tag = QLabel(f"  {display}")
-            tag.setMinimumWidth(28)
-            f = QFont(); f.setBold(True); f.setPointSize(11); tag.setFont(f)
-            h.addWidget(tag)
-
+            tag = QLabel(f"  {display}"); tag.setMinimumWidth(28)
+            ff = QFont(); ff.setBold(True); ff.setPointSize(11); tag.setFont(ff)
+            row.addWidget(tag)
             count = counts.get(label, 0)
             count_lbl = QLabel(f"{count}개 학습됨" if count > 0 else "학습되지 않음")
             if count == 0:
-                count_lbl.setStyleSheet("color: #888;")
-            h.addWidget(count_lbl, 1)
-
+                count_lbl.setStyleSheet("color:#888;")
+            row.addWidget(count_lbl, 1)
             btn = QPushButton("지우기")
-            btn.setFixedHeight(24)
+            btn.setFixedHeight(22)
             btn.setEnabled(count > 0)
-            btn.clicked.connect(lambda _=False, lab=label: self._on_clear_one(lab))
-            h.addWidget(btn)
+            btn.clicked.connect(
+                lambda _=False, lab=label, d=domain: self._on_clear_one(lab, d)
+            )
+            row.addWidget(btn)
+            col.addLayout(row)
 
-            self._body_layout.addWidget(row)
-        self._body_layout.addStretch(1)
+        return wrap
 
     # ───────── actions ─────────
-    def _on_clear_one(self, label: str) -> None:
+    def _on_clear_one(self, label: str, domain: str) -> None:
         display = "/" if label == "/" else label
+        ttl = _DOMAIN_TITLES.get(domain, domain)
         if QMessageBox.question(
             self, "글자 학습 삭제",
-            f"'{display}' 글자의 학습 데이터를 모두 지울까요?",
+            f"[{ttl}] 영역의 '{display}' 학습 데이터를 모두 지울까요?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         ) != QMessageBox.Yes:
             return
-        digit_store.clear_label(label)
+        digit_store.clear_label(
+            label, domain=None if domain == "legacy" else domain,
+        )
         self._dirty = True
-        self._refresh_rows()
+        self._refresh_all()
 
-    def _on_clear_all(self) -> None:
+    def _on_clear_domain(self, domain: str) -> None:
+        ttl = _DOMAIN_TITLES.get(domain, domain)
         if QMessageBox.question(
-            self, "전체 학습 초기화",
-            "모든 학습 데이터를 지울까요? 되돌릴 수 없습니다.",
+            self, "영역 학습 초기화",
+            f"[{ttl}] 영역의 모든 학습 데이터를 지울까요?\n"
+            "되돌릴 수 없습니다.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         ) != QMessageBox.Yes:
             return
-        digit_store.clear_templates()
+        digit_store.clear_templates(
+            domain=None if domain == "legacy" else domain,
+        )
         self._dirty = True
-        self._refresh_rows()
+        self._refresh_all()
 
     # ───────── lifecycle ─────────
     def accept(self) -> None:

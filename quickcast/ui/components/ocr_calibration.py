@@ -124,7 +124,8 @@ class OcrCalibrationDialog(QDialog):
 
     def __init__(self, roi_bgra: np.ndarray,
                   suggested_truth: str = "",
-                  parent: Optional[QWidget] = None):
+                  parent: Optional[QWidget] = None,
+                  domain: Optional[str] = None):
         super().__init__(parent)
         self.setWindowTitle("OCR 글자 학습")
         self.setModal(True)
@@ -136,6 +137,10 @@ class OcrCalibrationDialog(QDialog):
         # Capture-section reads it on success to show "added X samples"
         # toast that nudges the user toward more training passes.
         self._added_per_label: dict[str, int] = {}
+        # Which OCR domain this training run belongs to ("hp" / "mp" /
+        # "potion") — controls which subfolder of digits/ gets written.
+        # None = legacy global pool (only used by older callers).
+        self._domain = domain
 
         v = QVBoxLayout(self); v.setContentsMargins(16, 16, 16, 16)
         v.setSpacing(10)
@@ -245,14 +250,12 @@ class OcrCalibrationDialog(QDialog):
         if len(text) != len(boxes) or not boxes:
             return
 
-        # APPEND to the on-disk instance list — don't overwrite. Every
-        # training pass adds fresh per-glyph samples so the matcher can
-        # pick the best-fitting one at inference. After many passes the
-        # store ends up with e.g. 7 distinct "9" masks (from "999/2999",
-        # "1099/4099", …), which makes OCR robust to subtle rendering
-        # differences from one capture to the next.
-        existing = load_templates()
-        # Copy so we don't mutate the loaded dict's lists in place.
+        # Append into the chosen domain's pool (digits/<domain>/<glyph>/).
+        # Each training pass adds new per-glyph instances; inference
+        # picks best-of-N at match time. Different HUD regions get their
+        # own pool so an "8" trained from MP doesn't compete with the
+        # potion counter — see digit_store docstring.
+        existing = load_templates(domain=self._domain)
         new_templates: dict[str, list[np.ndarray]] = {
             k: list(v) for k, v in existing.items()
         }
@@ -261,8 +264,6 @@ class OcrCalibrationDialog(QDialog):
         for ch, (x, y, w, h) in zip(text, boxes):
             crop = self._roi[y : y + h, x : x + w]
             mask = _binarise(crop, threshold=thr_val)
-            # Trim to actual foreground in case binarisation produced
-            # padded margins (slight overhang of the segment box).
             ys = np.where(mask.any(axis=1))[0]
             xs = np.where(mask.any(axis=0))[0]
             if ys.size == 0 or xs.size == 0:
@@ -271,7 +272,14 @@ class OcrCalibrationDialog(QDialog):
             new_templates.setdefault(ch, []).append(mask)
             added_per_label[ch] = added_per_label.get(ch, 0) + 1
 
-        save_templates(new_templates)
+        save_templates(new_templates, domain=self._domain)
+        # Lock the canonical pixel size for this domain so inference
+        # normalises both glyph and template to the same shape, giving
+        # a clean shape-only matchTemplate. Uses the median of THIS
+        # training pass's box sizes when no canonical was set yet.
+        if self._domain:
+            from quickcast.core.digit_store import ensure_canonical_from_boxes
+            ensure_canonical_from_boxes(self._domain, boxes)
         self._templates = new_templates
         self._added_per_label = added_per_label
         self.accept()

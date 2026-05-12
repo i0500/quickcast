@@ -258,23 +258,44 @@ def _glyph_patch(roi_bgra: np.ndarray,
     return _binarise(crop, threshold=threshold)
 
 
-def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
+def _normalize_to(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Resize a uint8 mask to ``(width, height)`` for canonical match.
+
+    Inputs and templates rescaled to the same canonical size let
+    matchTemplate compare shape only — glyph-size differences across
+    HUD regions (HP / MP / potion text might render at slightly
+    different pixel sizes) stop affecting the score.
+
+    INTER_AREA on shrinks (good for binary masks), INTER_NEAREST on
+    growths so we don't smear in greyscale fringes that would defeat
+    the binarisation later.
+    """
+    w, h = int(size[0]), int(size[1])
+    if w <= 0 or h <= 0 or mask is None or mask.size == 0:
+        return mask
+    if mask.shape[0] == h and mask.shape[1] == w:
+        return mask
+    interp = cv2.INTER_AREA if mask.shape[0] > h else cv2.INTER_NEAREST
+    out = cv2.resize(mask, (w, h), interpolation=interp)
+    # Re-binarise — INTER_AREA can leave mid-gray values.
+    _, out = cv2.threshold(out, 127, 255, cv2.THRESH_BINARY)
+    return out
+
+
+def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray,
+                     canonical: Optional[tuple[int, int]] = None) -> float:
     """Score one (glyph, template) pair via TM_CCOEFF_NORMED.
 
-    The template is height-matched to the glyph (width scales
-    proportionally). When the resulting width differs from the
-    glyph's, we pad / centre-crop so cv2.matchTemplate sees equal
-    sized inputs.
+    When ``canonical=(w, h)`` is supplied (per-domain training has
+    locked in a canonical size), both glyph and template are
+    resized to that fixed pixel size before matching. matchTemplate
+    then compares pure shape — aspect / area penalties become
+    unnecessary because every input is the same size.
 
-    Plus an **aspect-ratio penalty**: matchTemplate happily produces
-    a high TM_CCOEFF_NORMED for a wide template (e.g. "0") against
-    a narrow glyph (e.g. "5") because the pad/crop step blanks out
-    the mismatched columns before comparison. So a tall-skinny "5"
-    in the wild gets scored decently against a fat "0" template and
-    "0" wins by default. We deflate the score proportionally to the
-    aspect-ratio mismatch so similarly-shaped glyphs beat anchor
-    glyphs with the wrong proportions. Penalty floors at 0.5 so a
-    moderate mismatch doesn't completely kill the signal.
+    When ``canonical`` is None we fall back to the legacy path:
+    height-match the template to the glyph, pad/crop width to fit,
+    then multiply by aspect + area penalties so wrong-shaped
+    templates can't hijack a column purely on pad-zero noise.
 
     Negative score on any failure.
     """
@@ -284,6 +305,18 @@ def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
     th, tw = tmpl.shape[:2]
     if th == 0 or tw == 0:
         return -1.0
+
+    # Canonical-size path: pure shape match, no penalty needed.
+    if canonical is not None:
+        g = _normalize_to(glyph_mask, canonical)
+        t = _normalize_to(tmpl, canonical)
+        try:
+            result = cv2.matchTemplate(g, t, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+        except cv2.error:
+            return -1.0
+        return float(max_val)
+
     scale = gh / th
     new_w = max(1, int(round(tw * scale)))
     new_h = gh
@@ -334,7 +367,9 @@ def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
 
 def _best_labels(glyph_mask: np.ndarray,
                    templates: dict[str, list[np.ndarray]],
-                   n: int = 2) -> list[tuple[str, float]]:
+                   n: int = 2,
+                   canonical: Optional[tuple[int, int]] = None,
+                   ) -> list[tuple[str, float]]:
     """Top-n (label, score) candidates for one glyph, score-descending.
 
     Domain post-processing in recognise() needs the *second*-best
@@ -360,7 +395,7 @@ def _best_labels(glyph_mask: np.ndarray,
         for tmpl in instances:
             if tmpl is None:
                 continue
-            score = _score_against(glyph_mask, tmpl)
+            score = _score_against(glyph_mask, tmpl, canonical=canonical)
             if score > per_label:
                 per_label = score
         if per_label >= 0:
@@ -430,7 +465,8 @@ def _apply_no_leading_zero(
 
 def recognise(roi_bgra: np.ndarray,
                templates: dict[str, list[np.ndarray]],
-               threshold: Optional[int] = None) -> OcrResult:
+               threshold: Optional[int] = None,
+               canonical: Optional[tuple[int, int]] = None) -> OcrResult:
     """Run the full OCR pipeline on one ROI.
 
     ``templates`` is now ``{label: [mask, ...]}`` — a list of learned
@@ -463,7 +499,7 @@ def recognise(roi_bgra: np.ndarray,
     per_box_tops: list[list[tuple[str, float]]] = []
     for box in boxes:
         gm = _glyph_patch(roi_bgra, box, threshold=threshold)
-        tops = _best_labels(gm, templates, n=2)
+        tops = _best_labels(gm, templates, n=2, canonical=canonical)
         per_box_tops.append(tops)
 
     # Top-1 picks for each box; "" placeholders for boxes that

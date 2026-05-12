@@ -462,6 +462,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         get_h: Callable[[], int], set_h: Callable[[int], None],
         suggested_truth: str,
         reset_kind: Optional[str] = None,
+        domain: Optional[str] = None,
     ) -> QWidget:
         """One row: [HP] X[..] Y[..] W[..] H[..]  [↺]  [학습]."""
         wrap = QWidget()
@@ -509,7 +510,8 @@ def make_capture() -> tuple[QWidget, QWidget]:
             from quickcast.ui.components.ocr_calibration import OcrCalibrationDialog
             dlg = OcrCalibrationDialog(np.ascontiguousarray(roi),
                                           suggested_truth=suggested_truth,
-                                          parent=main)
+                                          parent=main,
+                                          domain=domain)
             if dlg.exec():
                 # CRITICAL: persist the threshold the user just settled
                 # on. Without this, inference falls back to the auto
@@ -555,6 +557,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.hp_text_cap_h, lambda v: setattr(mock_settings, "hp_text_cap_h", v),
         "",
         reset_kind="hp_text",
+        domain="hp",
     ))
     ocr_card.add(_ocr_region_row(
         "MP",
@@ -564,6 +567,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.mp_text_cap_h, lambda v: setattr(mock_settings, "mp_text_cap_h", v),
         "",
         reset_kind="mp_text",
+        domain="mp",
     ))
     ocr_card.add(_ocr_region_row(
         "물약",
@@ -573,6 +577,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.potion_text_cap_h, lambda v: setattr(mock_settings, "potion_text_cap_h", v),
         "",
         reset_kind="potion_text",
+        domain="potion",
     ))
 
     v.addWidget(ocr_card)
