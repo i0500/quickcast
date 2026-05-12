@@ -359,13 +359,19 @@ class Recognizer:
         ocr_potion_score: float = 0.0
         if getattr(settings, "ocr_mode", False) and self._digit_templates:
             from quickcast.core.ocr import recognise, hp_percentage
+            # Use the same threshold the user learned with — 0 means
+            # "auto percentile" (ocr.py default), anything else is the
+            # exact slider value they saved in the calibration dialog.
+            ocr_thr_raw = int(getattr(settings, "ocr_threshold", 0) or 0)
+            ocr_thr = ocr_thr_raw if ocr_thr_raw > 0 else None
             # HP
             if settings.hp_text_cap_w > 0 and settings.hp_text_cap_h > 0:
                 hp_text_roi = frame.crop(
                     settings.hp_text_cap,
                     settings.hp_text_cap_w, settings.hp_text_cap_h,
                 )
-                r = recognise(hp_text_roi, self._digit_templates)
+                r = recognise(hp_text_roi, self._digit_templates,
+                                threshold=ocr_thr)
                 ocr_hp = hp_percentage(r)
             # MP
             if settings.mp_text_cap_w > 0 and settings.mp_text_cap_h > 0:
@@ -373,7 +379,8 @@ class Recognizer:
                     settings.mp_text_cap,
                     settings.mp_text_cap_w, settings.mp_text_cap_h,
                 )
-                r = recognise(mp_text_roi, self._digit_templates)
+                r = recognise(mp_text_roi, self._digit_templates,
+                                threshold=ocr_thr)
                 ocr_mp = hp_percentage(r)
             # Potion — single-number field; 0 == empty.
             if settings.potion_text_cap_w > 0 and settings.potion_text_cap_h > 0:
@@ -381,7 +388,8 @@ class Recognizer:
                     settings.potion_text_cap,
                     settings.potion_text_cap_w, settings.potion_text_cap_h,
                 )
-                r = recognise(po_text_roi, self._digit_templates)
+                r = recognise(po_text_roi, self._digit_templates,
+                                threshold=ocr_thr)
                 if r.confidence >= 0.55 and r.current is not None:
                     ocr_potion_empty = (r.current <= 0)
                     # Map confidence to legacy 0..250_000 magnitude so

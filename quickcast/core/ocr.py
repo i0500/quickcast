@@ -145,15 +145,18 @@ def segment_glyphs(roi_bgra: np.ndarray,
 
 
 def _glyph_patch(roi_bgra: np.ndarray,
-                  box: tuple[int, int, int, int]) -> np.ndarray:
+                  box: tuple[int, int, int, int],
+                  threshold: Optional[int] = None) -> np.ndarray:
     """Crop one glyph from the ROI as a binarised (H, W) uint8 mask.
 
     Binarising glyphs before matching makes the template scores
     insensitive to background colour / alpha bleed under the text.
+    ``threshold`` MUST match the value the templates were learned at
+    (passed through from recognise()) for the binary masks to align.
     """
     x, y, w, h = box
     crop = roi_bgra[y : y + h, x : x + w]
-    return _binarise(crop)
+    return _binarise(crop, threshold=threshold)
 
 
 def _best_label(glyph_mask: np.ndarray,
@@ -209,8 +212,15 @@ def _best_label(glyph_mask: np.ndarray,
 
 
 def recognise(roi_bgra: np.ndarray,
-               templates: dict[str, np.ndarray]) -> OcrResult:
+               templates: dict[str, np.ndarray],
+               threshold: Optional[int] = None) -> OcrResult:
     """Run the full OCR pipeline on one ROI.
+
+    ``threshold`` (0..255 or None) MUST match the binarisation value
+    the templates were learned at. Passing a different threshold makes
+    the runtime glyph masks diverge from the stored templates and
+    TM_CCOEFF_NORMED scores collapse — which manifests as "the same
+    digit fails to match itself" exactly like the user reported.
 
     Returns ``OcrResult`` — see its docstring for field semantics.
     A blank templates dict produces an empty result (no crash) so
@@ -219,14 +229,14 @@ def recognise(roi_bgra: np.ndarray,
     if roi_bgra is None or roi_bgra.size == 0 or not templates:
         return OcrResult(current=None, maximum=None, text="", confidence=0.0)
 
-    boxes = segment_glyphs(roi_bgra)
+    boxes = segment_glyphs(roi_bgra, threshold=threshold)
     if not boxes:
         return OcrResult(current=None, maximum=None, text="", confidence=0.0)
 
     labels: list[str] = []
     scores: list[float] = []
     for box in boxes:
-        gm = _glyph_patch(roi_bgra, box)
+        gm = _glyph_patch(roi_bgra, box, threshold=threshold)
         lab, sc = _best_label(gm, templates)
         if lab:
             labels.append(lab)

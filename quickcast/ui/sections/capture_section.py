@@ -443,6 +443,13 @@ def make_capture() -> tuple[QWidget, QWidget]:
                                           suggested_truth=suggested_truth,
                                           parent=main)
             if dlg.exec():
+                # CRITICAL: persist the threshold the user just settled
+                # on. Without this, inference falls back to the auto
+                # percentile while the saved glyph masks were binarised
+                # at the user's manual value — masks differ, OCR fails
+                # to match its own templates 1:1. (0 == auto sentinel.)
+                thr = dlg.chosen_threshold()
+                mock_settings.ocr_threshold = int(thr) if thr is not None else 0
                 bus.settings_dirty.emit()
                 # Recognizer picks up the new templates from disk via
                 # the bus subscription wired in AppWindow.

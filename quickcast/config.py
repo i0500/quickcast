@@ -247,6 +247,12 @@ class Settings(BaseModel):
     # individual *_text_cap fields are still kept so the user can train
     # without immediately committing the macro to OCR.
     ocr_mode: bool = False
+    # Binarisation threshold the user landed on in the calibration
+    # dialog. 0 ⇒ auto-percentile (same default as the OCR engine).
+    # The matcher MUST use the same value the templates were learned
+    # at, otherwise the binary masks differ and TM_CCOEFF_NORMED drops
+    # well below 1.0 for what should be identical glyphs.
+    ocr_threshold: int = 0
 
     # Slots — keyed by string id ("1".."9", "0", "11"+)
     slots: dict[str, Slot] = Field(default_factory=dict)

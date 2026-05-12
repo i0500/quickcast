@@ -268,5 +268,16 @@ class OcrCalibrationDialog(QDialog):
         """Return the templates dict the user just saved (empty on cancel)."""
         return self._templates
 
+    def chosen_threshold(self) -> Optional[int]:
+        """The binarisation threshold value the user landed on.
+
+        Returns the slider value (1..255) or ``None`` for auto. The
+        caller persists this to Settings so inference binarises the
+        same way training did — without this, the saved glyph masks
+        and the live capture masks diverge and TM_CCOEFF_NORMED never
+        reaches 1.0 even on a pixel-identical capture.
+        """
+        return self._canvas.threshold
+
 
 __all__ = ["OcrCalibrationDialog"]
