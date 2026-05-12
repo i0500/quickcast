@@ -397,18 +397,37 @@ class Recognizer:
                 )
                 r = recognise(po_text_roi, self._digit_templates,
                                 threshold=ocr_thr)
-                # Throttled debug — once every ~2s — so the user can
-                # see what OCR is actually reading off the potion ROI.
+                # Throttled diagnostic at INFO level so it lands in the
+                # dashboard log card — the user needs to actually see
+                # what OCR is reading to debug "0으로만 인식" reports.
                 import time as _t
                 now = _t.monotonic()
                 if now - self._last_potion_dbg_at > 2.0:
                     self._last_potion_dbg_at = now
-                    logger.debug(
+                    glyphs_str = ""
+                    if getattr(r, "glyphs", None):
+                        glyphs_str = " [" + " ".join(
+                            f"{lab or '?'}={sc:.2f}" for lab, sc in r.glyphs
+                        ) + "]"
+                    logger.info(
                         f"🔢 물약 OCR → text={r.text!r} cur={r.current} "
-                        f"conf={r.confidence:.2f}"
+                        f"conf={r.confidence:.2f}{glyphs_str}"
                     )
                 if r.confidence >= 0.45 and r.current is not None:
-                    ocr_potion_empty = (r.current <= 0)
+                    # "0 detected ⇒ potion empty" is the trigger for
+                    # the recovery sequence — it's the high-stakes
+                    # decision in this whole pipeline. An under-trained
+                    # template set ("0" learned but not "5"/"8"/…)
+                    # picks "0" weakly for every digit that crosses
+                    # the ROI, conf hovering around 0.4–0.6 and
+                    # firing recovery on every frame. Solution: keep
+                    # the generic 0.45 floor for "have potion" (False
+                    # is the safe non-firing answer), but require a
+                    # stricter 0.65 to flip to "empty" (True).
+                    if r.current <= 0:
+                        ocr_potion_empty = (r.confidence >= 0.65)
+                    else:
+                        ocr_potion_empty = False
                     # Map confidence to legacy 0..250_000 magnitude so
                     # combat-panel sliders / dashboards keep working.
                     ocr_potion_score = float(r.confidence) * 250_000.0

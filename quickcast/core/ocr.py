@@ -55,11 +55,19 @@ class OcrResult:
       like the potion counter.
     - ``confidence``: mean match score (0..1) across the recognised
       glyphs. Below ~0.6 the result should not be trusted.
+    - ``glyphs``: per-segment diagnostics: list of (label, score) pairs
+      in left-to-right order. Lets the dashboard log show exactly
+      which glyph was picked and how confident it was.
     """
     current: Optional[int]
     maximum: Optional[int]
     text: str
     confidence: float
+    glyphs: list[tuple[str, float]] = None    # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.glyphs is None:
+            self.glyphs = []
 
 
 def _binarise(roi_bgra: np.ndarray,
@@ -342,17 +350,21 @@ def recognise(roi_bgra: np.ndarray,
     callers can ship the OCR path before the user has learned glyphs.
     """
     if roi_bgra is None or roi_bgra.size == 0 or not templates:
-        return OcrResult(current=None, maximum=None, text="", confidence=0.0)
+        return OcrResult(current=None, maximum=None, text="",
+                          confidence=0.0, glyphs=[])
 
     boxes = segment_glyphs(roi_bgra, threshold=threshold)
     if not boxes:
-        return OcrResult(current=None, maximum=None, text="", confidence=0.0)
+        return OcrResult(current=None, maximum=None, text="",
+                          confidence=0.0, glyphs=[])
 
     labels: list[str] = []
     scores: list[float] = []
+    diag: list[tuple[str, float]] = []
     for box in boxes:
         gm = _glyph_patch(roi_bgra, box, threshold=threshold)
         lab, sc = _best_label(gm, templates)
+        diag.append((lab, sc))
         if lab:
             labels.append(lab)
             scores.append(sc)
@@ -379,7 +391,8 @@ def recognise(roi_bgra: np.ndarray,
         except ValueError:
             cur = None
 
-    return OcrResult(current=cur, maximum=maxv, text=text, confidence=conf)
+    return OcrResult(current=cur, maximum=maxv, text=text,
+                       confidence=conf, glyphs=diag)
 
 
 def hp_percentage(result: OcrResult) -> Optional[int]:
