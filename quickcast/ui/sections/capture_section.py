@@ -232,23 +232,21 @@ def make_capture() -> tuple[QWidget, QWidget]:
                 subtitle="미리보기 위에서 사각형 드래그가 더 직관적")
 
     # HP
-    hp_row = _coord_block(
+    roi.add(_coord_block(
         "HP",
         lambda: mock_settings.hp_cap.x, lambda v: setattr(mock_settings.hp_cap, "x", v),
         lambda: mock_settings.hp_cap.y, lambda v: setattr(mock_settings.hp_cap, "y", v),
         lambda: mock_settings.hp_cap_w, lambda v: setattr(mock_settings, "hp_cap_w", v),
         lambda: mock_settings.hp_cap_h, lambda v: setattr(mock_settings, "hp_cap_h", v),
-    )
-    roi.add(hp_row)
+    ))
     # MP
-    mp_row = _coord_block(
+    roi.add(_coord_block(
         "MP",
         lambda: mock_settings.mp_cap.x, lambda v: setattr(mock_settings.mp_cap, "x", v),
         lambda: mock_settings.mp_cap.y, lambda v: setattr(mock_settings.mp_cap, "y", v),
         lambda: mock_settings.mp_cap_w, lambda v: setattr(mock_settings, "mp_cap_w", v),
         lambda: mock_settings.mp_cap_h, lambda v: setattr(mock_settings, "mp_cap_h", v),
-    )
-    roi.add(mp_row)
+    ))
     # PK
     roi.add(_coord_block(
         "PK",
@@ -258,25 +256,14 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.pk.cap_h, lambda v: setattr(mock_settings.pk, "cap_h", v),
     ))
     # Potion
-    potion_row = _coord_block(
+    roi.add(_coord_block(
         "물약",
         lambda: mock_settings.potion.cap.x, lambda v: setattr(mock_settings.potion.cap, "x", v),
         lambda: mock_settings.potion.cap.y, lambda v: setattr(mock_settings.potion.cap, "y", v),
         lambda: mock_settings.potion.cap_w, lambda v: setattr(mock_settings.potion, "cap_w", v),
         lambda: mock_settings.potion.cap_h, lambda v: setattr(mock_settings.potion, "cap_h", v),
-    )
-    roi.add(potion_row)
+    ))
     v.addWidget(roi)
-
-    # HP / MP / Potion rows are hidden when OCR mode is on (those
-    # readings come from the *_text_cap regions instead). PK has no
-    # OCR equivalent so its row stays visible in both modes.
-    legacy_rows = (hp_row, mp_row, potion_row)
-    def _refresh_legacy_visibility() -> None:
-        hide = bool(getattr(mock_settings, "ocr_mode", False))
-        for w in legacy_rows:
-            w.setVisible(not hide)
-    _refresh_legacy_visibility()
 
     # ────────────────── OCR (텍스트 기반 인식) ──────────────────
     ocr_card = Card(
@@ -293,17 +280,80 @@ def make_capture() -> tuple[QWidget, QWidget]:
         state["frame"] = image
     bus.live_frame.connect(_on_live_frame)
 
-    # OCR-mode toggle
+    # OCR-mode toggle (handler defined after rows below so refresh
+    # closures see all widgets).
     mode_row = QHBoxLayout(); mode_row.setSpacing(8)
     mode_cb = QCheckBox("OCR 모드 사용 (학습된 글자 + 텍스트 영역으로 인식)")
     mode_cb.setChecked(bool(getattr(mock_settings, "ocr_mode", False)))
-    def _on_mode(checked: bool) -> None:
-        mock_settings.ocr_mode = bool(checked)
-        _refresh_legacy_visibility()
-        bus.settings_dirty.emit()
-    mode_cb.toggled.connect(_on_mode)
     mode_row.addWidget(mode_cb); mode_row.addStretch(1)
     ocr_card.add(mode_row)
+
+    # ── PK position inside the OCR card ──
+    # When OCR mode is on the legacy ROI card is hidden, so PK (which
+    # has no OCR equivalent — it's an icon match, not a digit) needs a
+    # home here so the user can still position it.
+    ocr_pk_row = _coord_block(
+        "PK 위치",
+        lambda: mock_settings.pk.cap.x, lambda v: setattr(mock_settings.pk.cap, "x", v),
+        lambda: mock_settings.pk.cap.y, lambda v: setattr(mock_settings.pk.cap, "y", v),
+        lambda: mock_settings.pk.cap_w, lambda v: setattr(mock_settings.pk, "cap_w", v),
+        lambda: mock_settings.pk.cap_h, lambda v: setattr(mock_settings.pk, "cap_h", v),
+    )
+    ocr_card.add(ocr_pk_row)
+
+    # Default text ROI seeds. Used when the user enables OCR mode for
+    # the first time without running auto-detect (or auto-detect missed
+    # a region) — gives a visible draggable rectangle at a sensible
+    # spot so MP/HP/POTION text boxes don't end up hidden at (0,0,0,0).
+    _DEFAULT_TEXT_ROIS: dict[str, tuple[int, int, int, int]] = {
+        "hp": (60, 18, 200, 18),
+        "mp": (60, 40, 200, 18),
+        "potion": (560, 600, 64, 28),
+    }
+
+    def _ensure_text_rois_have_defaults() -> bool:
+        """Seed any zero-sized text ROI with a default placement.
+
+        Returns True when at least one ROI was filled in (caller emits
+        settings_dirty + repaint).
+        """
+        from quickcast.config import Point
+        changed = False
+        if mock_settings.hp_text_cap_w <= 0 or mock_settings.hp_text_cap_h <= 0:
+            x, y, w, h = _DEFAULT_TEXT_ROIS["hp"]
+            mock_settings.hp_text_cap = Point(x=x, y=y)
+            mock_settings.hp_text_cap_w = w; mock_settings.hp_text_cap_h = h
+            changed = True
+        if mock_settings.mp_text_cap_w <= 0 or mock_settings.mp_text_cap_h <= 0:
+            x, y, w, h = _DEFAULT_TEXT_ROIS["mp"]
+            mock_settings.mp_text_cap = Point(x=x, y=y)
+            mock_settings.mp_text_cap_w = w; mock_settings.mp_text_cap_h = h
+            changed = True
+        if mock_settings.potion_text_cap_w <= 0 or mock_settings.potion_text_cap_h <= 0:
+            x, y, w, h = _DEFAULT_TEXT_ROIS["potion"]
+            mock_settings.potion_text_cap = Point(x=x, y=y)
+            mock_settings.potion_text_cap_w = w; mock_settings.potion_text_cap_h = h
+            changed = True
+        return changed
+
+    # Mode-driven visibility: in OCR mode the legacy ROI card disappears
+    # entirely (PK is exposed inside this OCR card via ocr_pk_row instead),
+    # and the ocr_pk_row shows up. In legacy mode the legacy card is
+    # back and ocr_pk_row hides.
+    def _refresh_mode_visibility() -> None:
+        ocr = bool(getattr(mock_settings, "ocr_mode", False))
+        roi.setVisible(not ocr)
+        ocr_pk_row.setVisible(ocr)
+    _refresh_mode_visibility()
+
+    def _on_mode(checked: bool) -> None:
+        mock_settings.ocr_mode = bool(checked)
+        if checked and _ensure_text_rois_have_defaults():
+            # Defaults filled in — let the preview redraw and disk save.
+            pass
+        _refresh_mode_visibility()
+        bus.settings_dirty.emit()
+    mode_cb.toggled.connect(_on_mode)
 
     # Auto-detect button (fills HP/MP/POTION text ROIs from the live frame)
     detect_row = QHBoxLayout(); detect_row.setSpacing(8)
