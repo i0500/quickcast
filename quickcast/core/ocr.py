@@ -92,13 +92,23 @@ def segment_glyphs(roi_bgra: np.ndarray,
     """Find bounding boxes for each glyph in a HUD text ROI.
 
     Returns a list of ``(x, y, w, h)`` boxes, left-to-right. Boxes are
-    in ROI-local coordinates. Empty list ⇒ no glyphs detected (likely
-    a bad ROI or no text present). ``threshold`` overrides the auto
-    binarisation percentile when the calibration UI exposes a slider.
+    in ROI-local coordinates. Empty list ⇒ no glyphs detected.
 
-    Algorithm: binarise → vertical-projection profile → runs of >0
-    foreground pixels delimit glyph columns. Each column run is then
-    cropped vertically to the foreground extent for that glyph.
+    Algorithm has two passes:
+
+    1. **Projection pass** — binarise, sum foreground pixels per column,
+       and treat each contiguous run of non-zero columns as one glyph
+       box (cropped vertically to its foreground extent).
+    2. **Width-split pass** — if some boxes ended up much wider than
+       the typical glyph (anti-aliased fringes can bridge adjacent
+       digits at low binarisation thresholds, fusing them into one
+       run), split them into ``round(width / median_width)`` equal-
+       width sub-boxes. The valley between two glued digits isn't
+       always a clean zero-column so column gaps alone miss those
+       cases; the width statistic catches them.
+
+    ``threshold`` overrides the auto binarisation percentile when the
+    calibration UI exposes a slider.
     """
     mask = _binarise(roi_bgra, threshold=threshold)
     h, w = mask.shape
@@ -141,7 +151,88 @@ def segment_glyphs(roi_bgra: np.ndarray,
                 y0, y1 = int(rows[0]), int(rows[-1]) + 1
                 if (y1 - y0) >= min_glyph_h:
                     boxes.append((run_x0, y0, gw, y1 - y0))
-    return boxes
+
+    return _split_wide_boxes(boxes, mask)
+
+
+def _split_wide_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    mask: np.ndarray,
+) -> list[tuple[int, int, int, int]]:
+    """Split fused-glyph boxes using width + height + aspect signals.
+
+    The single-feature width-only version missed two real cases:
+
+    - "10"-style fusions where a thin digit ("1") plus a wide digit
+      ("0") add up to only ~1.4 × median width, below the 1.5
+      threshold.
+    - Noisy stray pixels producing a tiny box that distorted the
+      median and let real fused pairs slip through.
+
+    So we now:
+
+    1. Drop boxes whose height is < 50 % of the median (noise) before
+       computing width stats. They go to the output as-is *after*
+       the split decision so the projection still records them.
+    2. Compute median glyph width on the *non-noise* boxes.
+    3. Mark a box as fused when **any** of:
+         - width > 1.4 × median_w
+         - aspect ratio (w / h) > 1.15      (a single digit is taller
+                                             than wide in a HUD font)
+    4. Split fused boxes into ``round(w / median_w)`` equal-width
+       sub-boxes (clamped to ≥ 2).
+    5. Re-crop each sub-box vertically so its bounding rect matches
+       the actual foreground.
+    """
+    if len(boxes) < 2:
+        return boxes
+
+    heights = sorted(b[3] for b in boxes)
+    median_h = heights[len(heights) // 2]
+    noise_h_threshold = max(2, int(median_h * 0.5))
+
+    # Separate "real" boxes from "noise" for the median-width estimate.
+    real_widths = [b[2] for b in boxes if b[3] >= noise_h_threshold]
+    if len(real_widths) < 2:
+        return boxes
+    real_widths.sort()
+    median_w = real_widths[len(real_widths) // 2]
+    if median_w <= 0:
+        return boxes
+
+    out: list[tuple[int, int, int, int]] = []
+    for x, y, w, h in boxes:
+        if h < noise_h_threshold:
+            # tiny stray — keep as-is so user can see it in the
+            # calibration preview, but don't split it.
+            out.append((x, y, w, h))
+            continue
+        ratio = w / median_w
+        aspect = w / max(1, h)
+        fused = ratio >= 1.4 or aspect > 1.15
+        if not fused:
+            out.append((x, y, w, h))
+            continue
+        # Pick split count from the width ratio (rounded), capped low
+        # at 2. If the aspect-only rule fired (ratio < 1.4) we still
+        # split into ≥ 2 because aspect > 1.15 means at least 2 glyphs
+        # are crammed in.
+        n = max(2, int(round(ratio)))
+        sub_w = w / n
+        for i in range(n):
+            sx0 = int(round(x + i * sub_w))
+            sx1 = int(round(x + (i + 1) * sub_w))
+            if sx1 <= sx0:
+                continue
+            band = mask[:, sx0:sx1]
+            if band.size == 0 or not band.any():
+                out.append((sx0, y, sx1 - sx0, h))
+                continue
+            rows = np.where(band.any(axis=1))[0]
+            y0 = int(rows[0])
+            y1 = int(rows[-1]) + 1
+            out.append((sx0, y0, sx1 - sx0, max(1, y1 - y0)))
+    return out
 
 
 def _glyph_patch(roi_bgra: np.ndarray,
