@@ -286,11 +286,14 @@ class Recognizer:
                 f" 물약: {'OK' if po_ok else 'FAIL'}"
             )
         self._last_score_log_at = 0.0
+        # Throttle the per-frame potion-OCR debug log to once per ~2s
+        # so a 10 fps capture loop doesn't drown the log card.
+        self._last_potion_dbg_at = 0.0
         # Digit templates for the OCR path. Loaded lazily so a fresh
         # install that hasn't trained yet doesn't pay the disk hit on
         # every analyse() call. reload_digits() refreshes from disk
         # whenever the learner saves a new set.
-        self._digit_templates: dict[str, np.ndarray] = {}
+        self._digit_templates: dict[str, list[np.ndarray]] = {}
         self.reload_digits()
 
     def reload_digits(self) -> None:
@@ -357,7 +360,8 @@ class Recognizer:
         ocr_mp: Optional[int] = None
         ocr_potion_empty: Optional[bool] = None
         ocr_potion_score: float = 0.0
-        if getattr(settings, "ocr_mode", False) and self._digit_templates:
+        ocr_active = bool(getattr(settings, "ocr_mode", False) and self._digit_templates)
+        if ocr_active:
             from quickcast.core.ocr import recognise, hp_percentage
             # Use the same threshold the user learned with — 0 means
             # "auto percentile" (ocr.py default), anything else is the
@@ -383,6 +387,9 @@ class Recognizer:
                                 threshold=ocr_thr)
                 ocr_mp = hp_percentage(r)
             # Potion — single-number field; 0 == empty.
+            # Confidence threshold lowered to 0.45 (was 0.55) because a
+            # single-glyph counter is harder to match cleanly than a
+            # full "cur/max" string, and 0.55 was rejecting valid hits.
             if settings.potion_text_cap_w > 0 and settings.potion_text_cap_h > 0:
                 po_text_roi = frame.crop(
                     settings.potion_text_cap,
@@ -390,11 +397,30 @@ class Recognizer:
                 )
                 r = recognise(po_text_roi, self._digit_templates,
                                 threshold=ocr_thr)
-                if r.confidence >= 0.55 and r.current is not None:
+                # Throttled debug — once every ~2s — so the user can
+                # see what OCR is actually reading off the potion ROI.
+                import time as _t
+                now = _t.monotonic()
+                if now - self._last_potion_dbg_at > 2.0:
+                    self._last_potion_dbg_at = now
+                    logger.debug(
+                        f"🔢 물약 OCR → text={r.text!r} cur={r.current} "
+                        f"conf={r.confidence:.2f}"
+                    )
+                if r.confidence >= 0.45 and r.current is not None:
                     ocr_potion_empty = (r.current <= 0)
                     # Map confidence to legacy 0..250_000 magnitude so
                     # combat-panel sliders / dashboards keep working.
                     ocr_potion_score = float(r.confidence) * 250_000.0
+                else:
+                    # OCR couldn't read it confidently — DO NOT fall
+                    # through to the legacy template match (the user
+                    # has stopped maintaining that ROI in OCR mode and
+                    # it tends to false-positive "potion empty"). Mark
+                    # as a safe non-empty so the macro doesn't fire on
+                    # bad data.
+                    ocr_potion_empty = False
+                    ocr_potion_score = 0.0
 
         # Per-kind scale matches the legacy threshold magnitudes so the
         # existing PK 1M-5M / Potion 50K-250K sliders still work. Skip
