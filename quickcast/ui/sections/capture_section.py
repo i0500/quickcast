@@ -28,6 +28,15 @@ from quickcast.ui.sections._mock_state import mock_settings
 from quickcast.ui.stepper import Stepper
 
 
+# OCR feature is parked for now — accuracy work in progress. Flip
+# this to True to bring the whole OCR card (mode toggle, auto-detect,
+# per-region text ROIs + train buttons, manage dialog, PK reposition
+# inside OCR card) back. All OCR code paths stay compiled so re-enabling
+# is one-line; setting also forces ocr_mode False on every section
+# rebuild so any stale userdata.json doesn't quietly leave it on.
+OCR_FEATURE_ENABLED = False
+
+
 def _make_reset_button() -> QPushButton:
     """Compact "리셋" button used inline next to every ROI coord row.
 
@@ -315,6 +324,20 @@ def make_capture() -> tuple[QWidget, QWidget]:
     v.addWidget(roi)
 
     # ────────────────── OCR (텍스트 기반 인식) ──────────────────
+    # Feature flag — see OCR_FEATURE_ENABLED at the top of this file.
+    # When False we still BUILD the OCR card (all the wiring stays
+    # alive so it can be flipped back on without code surgery) but
+    # immediately hide it. We also force ocr_mode off so any user who
+    # enabled it in a previous build falls back cleanly to the
+    # colour/template detectors.
+    if not OCR_FEATURE_ENABLED:
+        try:
+            if getattr(mock_settings, "ocr_mode", False):
+                mock_settings.ocr_mode = False
+                bus.settings_dirty.emit()
+        except Exception:
+            pass
+
     ocr_card = Card(
         "OCR — 텍스트 기반 인식 (베타)",
         subtitle=(
@@ -581,6 +604,8 @@ def make_capture() -> tuple[QWidget, QWidget]:
     ))
 
     v.addWidget(ocr_card)
+    if not OCR_FEATURE_ENABLED:
+        ocr_card.setVisible(False)
 
     # ────────────────── 아이템 획득 닫기 ──────────────────
     item_card = Card(
