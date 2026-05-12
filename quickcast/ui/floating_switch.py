@@ -51,9 +51,10 @@ EXPAND_BTN_PX = 16
 
 # Sub-toggle row sizing — much tighter than the top bar so the panel
 # stays narrow and the rows feel like compact sub-controls.
-ROW_TOGGLE_W = 26
-ROW_TOGGLE_H = 14
-ROW_LABEL_PT = 8
+ROW_TOGGLE_W = 22
+ROW_TOGGLE_H = 12
+ROW_LABEL_PT = 7
+ROW_HEIGHT = 14
 
 TRACK_INTERVAL_MS = 200
 DRAG_THRESHOLD_PX = 3
@@ -250,6 +251,14 @@ class FloatingSwitch(QWidget):
         self.set_panel_open(not self._panel.isVisible())
 
     def set_panel_open(self, opened: bool) -> None:
+        # Remember the floater's current top-left so the panel toggle
+        # only changes the height. The default anchor calculation in
+        # _track() includes self.height(), which would otherwise yank
+        # the whole floater downward by the panel's height the moment
+        # we expand. We re-pin _user_offset to the current x/y so the
+        # tracker treats this position as the new anchor.
+        cur_x, cur_y = self.x(), self.y()
+
         if opened:
             self._rebuild_panel()
         self._panel.setVisible(opened)
@@ -258,13 +267,25 @@ class FloatingSwitch(QWidget):
             "chevron-up" if opened else "chevron-down",
             EXPAND_BTN_PX, "#cfd6e2",
         ))
-        # Anchor at top-right corner: re-fit and re-position so the
-        # panel grows downward without shifting the toggle. We lock
-        # the floater width to the top bar so the panel never inflates
-        # the row above it.
+        # Lock the floater width to the top bar so the panel never
+        # inflates the row above it.
         self.adjustSize()
         if self._top_width > 0:
             self.setFixedWidth(self._top_width)
+        # Restore the original position — height changed, top-left
+        # didn't, so the floater visually grows downward only.
+        self.move(cur_x, cur_y)
+        # Refresh _user_offset against the new (locked) position so
+        # the periodic _track() call doesn't snap it back to the
+        # height-dependent default anchor on the next tick.
+        if self._target_hwnd is not None:
+            rect = (get_client_rect_screen(self._target_hwnd)
+                    or get_window_rect(self._target_hwnd))
+            if rect is not None:
+                self._user_offset = QPoint(
+                    rect.right - self.x() - self.width(),
+                    self.y() - rect.top,
+                )
         self._track()
 
     def _collect_use_state(self) -> dict[str, bool]:
@@ -348,10 +369,9 @@ class FloatingSwitch(QWidget):
     def _add_row(self, label_text: str, state: bool,
                   on_toggle) -> None:
         row = QWidget(self._panel)
-        # Constrain row height so the panel stays vertically tight.
-        row.setFixedHeight(ROW_TOGGLE_H + 4)
+        row.setFixedHeight(ROW_HEIGHT)
         h = QHBoxLayout(row)
-        h.setContentsMargins(0, 1, 0, 1)
+        h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(2)
         lbl = QLabel(label_text)
         lbl.setStyleSheet(
