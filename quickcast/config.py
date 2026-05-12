@@ -191,10 +191,14 @@ class ItemCloseSettings(BaseModel):
     a click there every ``interval_seconds`` while the macro is on.
     Default 5 minutes — typical popup is rare. UI exposes minutes,
     not seconds, since the user thinks in minutes here.
+
+    Default coordinate (53, 709) is the user-confirmed "OK" button
+    of the Lineage W item-acquired popup at 1280×720 — fresh
+    installs land directly on the right spot.
     """
     enabled: bool = False
-    x: int = 0
-    y: int = 0
+    x: int = 53
+    y: int = 709
     interval_seconds: float = 300.0    # 5 minutes (UI shows as 분)
 
 
