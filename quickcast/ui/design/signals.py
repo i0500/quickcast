@@ -38,6 +38,10 @@ class _SignalBus(QObject):
     # so the next frame's OCR sees the freshly learned glyphs without
     # an app restart.
     digit_templates_changed = Signal()
+    # Item-close click coord picker: capture section asks the preview
+    # to enter pick mode, preview emits the chosen point on click.
+    item_close_pick_request = Signal()
+    item_close_pick_done = Signal(int, int)    # (frame_x, frame_y)
     # Live captured frame (numpy BGRA), latest analysis, and fps.
     # Emitted from AppWindow so any widget (dashboard preview, fullscreen
     # window, …) can mirror the real game image without each rebuilding

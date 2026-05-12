@@ -577,6 +577,68 @@ def make_capture() -> tuple[QWidget, QWidget]:
 
     v.addWidget(ocr_card)
 
+    # ────────────────── 아이템 획득 닫기 ──────────────────
+    item_card = Card(
+        "아이템 획득 닫기",
+        subtitle=(
+            "일정 분 주기로 지정한 좌표를 클릭해서 \"아이템 획득\" 팝업을 닫습니다.\n"
+            "[위치 선택]을 누르고 미리보기에서 닫기 버튼 위치를 클릭하세요."
+        ),
+    )
+
+    ic_enabled = QCheckBox("활성화")
+    ic_enabled.setChecked(bool(getattr(mock_settings.item_close, "enabled", False)))
+    def _on_ic_enabled(checked: bool) -> None:
+        mock_settings.item_close.enabled = bool(checked)
+        bus.settings_dirty.emit()
+    ic_enabled.toggled.connect(_on_ic_enabled)
+
+    en_row = QHBoxLayout(); en_row.setSpacing(8)
+    en_row.addWidget(ic_enabled); en_row.addStretch(1)
+    item_card.add(en_row)
+
+    # Coord row: X / Y stepper + "위치 선택" + 리셋
+    coord_row = QHBoxLayout(); coord_row.setSpacing(10)
+    coord_row.addWidget(_bind_axis(
+        "X", lambda: mock_settings.item_close.x,
+        lambda v: setattr(mock_settings.item_close, "x", v), 1280))
+    coord_row.addWidget(_bind_axis(
+        "Y", lambda: mock_settings.item_close.y,
+        lambda v: setattr(mock_settings.item_close, "y", v), 720))
+    pick_btn = IconButton("위치 선택", "crosshair", variant="secondary", size="sm")
+    def _pick_item_close() -> None:
+        try:
+            bus.item_close_pick_request.emit()
+        except Exception:
+            pass
+    pick_btn.clicked.connect(_pick_item_close)
+    coord_row.addWidget(pick_btn)
+
+    ic_reset = _make_reset_button()
+    def _reset_ic() -> None:
+        mock_settings.item_close.x = 0
+        mock_settings.item_close.y = 0
+        bus.settings_dirty.emit()
+    ic_reset.clicked.connect(_reset_ic)
+    coord_row.addWidget(ic_reset)
+    coord_row.addStretch(1)
+    item_card.add(coord_row)
+
+    # Interval row — minutes (1..60)
+    iv_row = QHBoxLayout(); iv_row.setSpacing(10)
+    iv_label = QLabel("간격 (분)"); iv_label.setMinimumWidth(70)
+    reactive(iv_label, lambda: f"color:{T.palette.text_secondary};")
+    iv_row.addWidget(iv_label)
+    iv_row.addWidget(_bind_axis(
+        "", lambda: int(mock_settings.item_close.interval_seconds / 60),
+        lambda v: setattr(mock_settings.item_close, "interval_seconds",
+                            float(max(1, v)) * 60.0),
+        60))
+    iv_row.addStretch(1)
+    item_card.add(iv_row)
+
+    v.addWidget(item_card)
+
     v.addStretch(1)
     return sidebar, main
 

@@ -182,6 +182,22 @@ class Alarm(BaseModel):
     mode: str = "repeat"
 
 
+class ItemCloseSettings(BaseModel):
+    """Auto-click a fixed screen spot every few minutes.
+
+    Use case: the "item acquired" popup the game throws up
+    periodically that you have to dismiss with one click. User picks
+    one game-frame coordinate (1280×720 normalised) and we PostMessage
+    a click there every ``interval_seconds`` while the macro is on.
+    Default 5 minutes — typical popup is rare. UI exposes minutes,
+    not seconds, since the user thinks in minutes here.
+    """
+    enabled: bool = False
+    x: int = 0
+    y: int = 0
+    interval_seconds: float = 300.0    # 5 minutes (UI shows as 분)
+
+
 class RecoveryStep(BaseModel):
     """One step in the town-return recovery sequence — either a click
     at (x, y) or a key press if `key` is non-empty."""
@@ -313,6 +329,9 @@ class Settings(BaseModel):
     # Town-return recovery sequence — clicks a preset list of points to
     # navigate back to hunting after a forced return event.
     recovery: "RecoverySettings" = Field(default_factory=lambda: RecoverySettings())
+    # Auto-dismiss "item acquired" popup — click a fixed game-frame
+    # coord every N seconds while the macro is running.
+    item_close: ItemCloseSettings = Field(default_factory=ItemCloseSettings)
     notify_on_alarm_toast: bool = True   # Windows tray toast on alarm
     notify_on_action_toast: bool = False  # Optional toast when slot fires
 
@@ -621,7 +640,7 @@ def _default_slots() -> dict[str, Slot]:
 
 
 __all__ = [
-    "Range", "Point", "Slot", "PkSlot", "PotionSlot",
+    "Range", "Point", "Slot", "PkSlot", "PotionSlot", "ItemCloseSettings",
     "RoiProfile", "ASPECT_BUCKETS", "ROI_DEFAULTS", "classify_aspect",
     "Alarm", "Settings", "CONFIG_PATH", "DATA_DIR",
 ]

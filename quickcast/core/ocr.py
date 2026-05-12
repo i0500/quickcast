@@ -308,19 +308,28 @@ def _score_against(glyph_mask: np.ndarray, tmpl: np.ndarray) -> float:
         _, max_val, _, _ = cv2.minMaxLoc(result)
     except cv2.error:
         return -1.0
-    # Aspect penalty: compare native template width vs glyph width
-    # (after height-match). Big difference ⇒ shape mismatch, downweight
-    # quadratically so a "0" template doesn't drift over to claiming
-    # narrow "5"-shaped glyphs.
-    #
-    # Linear penalty (the first version) only dropped a 70%-width
-    # mismatch to 0.7× — still high enough that "0" beat the right
-    # glyph on under-trained sets. Quadratic drops the same case to
-    # ~0.49, with a 0.2 floor so heavily-mismatched edge cases keep
-    # a tiny signal rather than disappearing entirely.
+    # ── Aspect (width-ratio) penalty ──
+    # Down-weight when template and glyph widths disagree, quadratic
+    # so a "0" template doesn't drift over to narrow "5"-shaped glyphs.
+    # Floor at 0.2 keeps a tiny signal for edge cases.
     width_ratio = min(gw, new_w) / max(gw, new_w)
-    penalty = max(0.2, width_ratio * width_ratio)
-    return float(max_val) * penalty
+    aspect_penalty = max(0.2, width_ratio * width_ratio)
+
+    # ── Area (foreground-pixel) penalty ──
+    # Width alone doesn't catch "1" winning a "5"-shaped glyph: a
+    # narrow "1" template can be width-similar to a partially-cropped
+    # "5", yet its total foreground area is far smaller. Compare
+    # foreground pixel counts directly; large mismatch ⇒ wrong glyph.
+    # Floor at 0.3 so small natural variation isn't crushed.
+    g_area = int((glyph_mask > 0).sum())
+    t_area = int((tmpl > 0).sum())
+    if g_area > 0 and t_area > 0:
+        area_ratio = min(g_area, t_area) / max(g_area, t_area)
+        area_penalty = max(0.3, area_ratio)
+    else:
+        area_penalty = 0.5
+
+    return float(max_val) * aspect_penalty * area_penalty
 
 
 def _best_labels(glyph_mask: np.ndarray,

@@ -98,6 +98,9 @@ class InteractivePreview(QWidget):
         # dragging an ROI. The dashboard wires this up; this widget just
         # holds the flag, draws the banner, and emits the result.
         self._pick_mode_idx: Optional[int] = None
+        # Item-close pick mode — same idea but routes the click into
+        # the ItemCloseSettings coord via bus.item_close_pick_done.
+        self._item_close_pick: bool = False
 
         # Master grace-period countdown (seconds remaining). 0 = idle.
         self._grace_remaining: float = 0.0
@@ -395,9 +398,19 @@ class InteractivePreview(QWidget):
         """Arm the next click to capture (x, y) into recovery step `idx`."""
         from quickcast.utils.logger import logger
         self._pick_mode_idx = int(idx)
+        self._item_close_pick = False
         self.setCursor(Qt.CrossCursor)
         self.update()
         logger.debug(f"recovery: pick mode armed for step #{idx + 1}")
+
+    def enter_item_close_pick_mode(self) -> None:
+        """Arm the next click to capture (x, y) into the item-close coord."""
+        from quickcast.utils.logger import logger
+        self._item_close_pick = True
+        self._pick_mode_idx = None
+        self.setCursor(Qt.CrossCursor)
+        self.update()
+        logger.debug("item-close: pick mode armed")
 
     def _on_grace_changed(self, remaining: float) -> None:
         self._grace_remaining = max(0.0, float(remaining))
@@ -430,6 +443,21 @@ class InteractivePreview(QWidget):
             self.update()
             logger.debug(f"recovery: step #{idx + 1} coords ({fp.x()},{fp.y()})")
             bus.recovery_pick_done.emit(idx, int(fp.x()), int(fp.y()))
+            e.accept()
+            return
+
+        # Item-close pick mode — same idea, single coord.
+        if self._item_close_pick and e.button() == Qt.LeftButton:
+            from quickcast.utils.logger import logger
+            from quickcast.ui.design.signals import bus
+            fp = self._widget_to_frame(e.position().x(), e.position().y())
+            if fp is None:
+                return
+            self._item_close_pick = False
+            self.unsetCursor()
+            self.update()
+            logger.debug(f"item-close: coords ({fp.x()},{fp.y()})")
+            bus.item_close_pick_done.emit(int(fp.x()), int(fp.y()))
             e.accept()
             return
 

@@ -59,6 +59,10 @@ class MacroController:
         self._latest_lock = threading.Lock()
         self._latest_frame: Optional[Frame] = None
         self._latest_analysis: Optional[FrameAnalysis] = None
+        # Timestamp of the last "item close" auto-click. Throttles the
+        # popup-dismiss feature to settings.item_close.interval_seconds
+        # so we don't spam the game window with clicks.
+        self._last_item_close_at: float = 0.0
 
     # ───────── lifecycle ─────────
     def start(self) -> None:
@@ -284,6 +288,41 @@ class MacroController:
         # Recovery sequence trigger detection — uses the same `analysis`
         # and the list of slots that just fired this tick.
         self._maybe_trigger_recovery(analysis, fired_ids)
+
+        # Auto-click the "item acquired" popup dismiss point. Runs
+        # only while master is on (we're already past the early-out)
+        # and respects the user's interval.
+        self._maybe_item_close_click()
+
+    def _maybe_item_close_click(self) -> None:
+        ic = getattr(self.settings, "item_close", None)
+        if ic is None or not getattr(ic, "enabled", False):
+            return
+        # Coordinates of 0×0 means "not set yet" — don't click random
+        # corner of the screen on a half-configured install.
+        if ic.x <= 0 and ic.y <= 0:
+            return
+        hwnd = int(getattr(self, "_auto_hwnd", 0) or 0)
+        if not hwnd:
+            return
+        interval = max(0.5, float(ic.interval_seconds))
+        now = time.monotonic()
+        if (now - self._last_item_close_at) < interval:
+            return
+        self._last_item_close_at = now
+        # Pull the frame size so click_at can translate from the
+        # 1280×720 normalised coord to actual client pixels.
+        frame_size = None
+        with self._latest_lock:
+            if self._latest_frame is not None:
+                fh, fw = self._latest_frame.image.shape[:2]
+                frame_size = (int(fw), int(fh))
+        try:
+            from quickcast.input_io.win32_input import click_at
+            click_at(hwnd, int(ic.x), int(ic.y),
+                      frame_size=frame_size, method="postmessage")
+        except Exception:
+            logger.exception("item-close: click_at failed")
 
     def _maybe_trigger_recovery(self, analysis: FrameAnalysis,
                                   fired_slot_ids: Optional[list] = None) -> None:

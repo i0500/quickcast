@@ -606,6 +606,24 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
         _pick_bus.activate_section.emit("combat")
     _pick_bus.recovery_pick_done.connect(_on_pick_done)
 
+    # Item-close pick mode — same flow, single coord into Settings.item_close.
+    def _on_ic_pick_request() -> None:
+        from quickcast.utils.logger import logger
+        logger.debug("item-close: pick request")
+        preview.preview.enter_item_close_pick_mode()
+        _pick_bus.activate_section.emit("dashboard")
+    _pick_bus.item_close_pick_request.connect(_on_ic_pick_request)
+
+    def _on_ic_pick_done(x: int, y: int) -> None:
+        from quickcast.utils.logger import logger
+        from quickcast.ui.sections._mock_state import mock_settings
+        mock_settings.item_close.x = int(x)
+        mock_settings.item_close.y = int(y)
+        logger.info(f"📍 아이템 닫기 좌표 ({x},{y})")
+        _pick_bus.settings_dirty.emit()
+        _pick_bus.activate_section.emit("capture")
+    _pick_bus.item_close_pick_done.connect(_on_ic_pick_done)
+
     # ── ROI lock toggle wiring ──
     from quickcast.ui.sections._mock_state import mock_settings
     initial_locked = bool(getattr(mock_settings, "roi_locked", False))
