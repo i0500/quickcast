@@ -396,7 +396,13 @@ class FloatingSwitch(QWidget):
         lbl.setMinimumWidth(0)
         h.addWidget(lbl, 1)
         tgl = IOSToggle(width=ROW_TOGGLE_W, height=ROW_TOGGLE_H, parent=row)
-        tgl.set_state(state)
+        # ``animate=False`` for the initial value — newly created
+        # IOSToggle starts at OFF, and the default ``set_state(True)``
+        # plays a 180 ms knob-slide animation, which the user sees as
+        # a brief "OFF → ON flash" the first time the panel opens.
+        # Subsequent user clicks still animate (set_state on the
+        # mouse press path keeps animate=True).
+        tgl.set_state(state, animate=False)
         tgl.toggled.connect(on_toggle)
         h.addWidget(tgl, 0)
         self._panel_layout.addWidget(row)
