@@ -29,12 +29,30 @@ from quickcast.ui.stepper import Stepper
 
 
 def _make_reset_button() -> QPushButton:
-    """Compact "↺" button used inline next to every ROI coord row."""
-    b = QPushButton("↺")
-    b.setFixedSize(26, 26)
-    b.setToolTip("초기 위치로 복원")
+    """Compact "리셋" button used inline next to every ROI coord row.
+
+    Text-only (no icon) and slightly tinted so it doesn't compete with
+    the primary action buttons. The earlier "↺" arrow glyph wasn't
+    present in the bundled UI font and rendered as the missing-glyph
+    box on most setups.
+    """
+    b = QPushButton("리셋")
+    b.setFixedHeight(26)
+    b.setMinimumWidth(46)
+    b.setToolTip("이 ROI를 초기 위치로 복원합니다")
     b.setCursor(Qt.PointingHandCursor)
-    f = QFont(); f.setBold(True); f.setPointSize(11); b.setFont(f)
+    f = QFont(); f.setPointSize(9); b.setFont(f)
+    # Subtle ghost style — lighter than the main action buttons.
+    reactive(b, lambda: (
+        f"QPushButton {{"
+        f" color:{T.palette.text_secondary};"
+        f" background:transparent;"
+        f" border:1px solid {T.palette.border_default};"
+        f" border-radius:4px; padding:2px 8px;"
+        f"}}"
+        f"QPushButton:hover {{ color:{T.palette.text_primary};"
+        f" border-color:{T.palette.border_strong}; }}"
+    ))
     return b
 
 
