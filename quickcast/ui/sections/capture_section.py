@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QMessageBox,
-    QVBoxLayout, QWidget,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from quickcast.ui.components.card import Card
@@ -26,6 +26,16 @@ from quickcast.ui.design.themed import reactive
 from quickcast.ui.design.tokens import T
 from quickcast.ui.sections._mock_state import mock_settings
 from quickcast.ui.stepper import Stepper
+
+
+def _make_reset_button() -> QPushButton:
+    """Compact "↺" button used inline next to every ROI coord row."""
+    b = QPushButton("↺")
+    b.setFixedSize(26, 26)
+    b.setToolTip("초기 위치로 복원")
+    b.setCursor(Qt.PointingHandCursor)
+    f = QFont(); f.setBold(True); f.setPointSize(11); b.setFont(f)
+    return b
 
 
 def _bind_axis(label: str, get_v: Callable[[], int], set_v: Callable[[int], None],
@@ -52,8 +62,16 @@ def _coord_block(title_text: str,
                   get_x: Callable[[], int], set_x: Callable[[int], None],
                   get_y: Callable[[], int], set_y: Callable[[int], None],
                   get_w: Callable[[], int], set_w: Callable[[int], None],
-                  get_h: Callable[[], int], set_h: Callable[[int], None]) -> QWidget:
-    """One row: [label]  X[..] Y[..] W[..] H[..] — fully bound."""
+                  get_h: Callable[[], int], set_h: Callable[[int], None],
+                  reset_kind: Optional[str] = None) -> QWidget:
+    """One row: [label]  X[..] Y[..] W[..] H[..]  [↺]   — fully bound.
+
+    When ``reset_kind`` is one of the ROI_DEFAULTS keys ("hp" / "mp" /
+    "pk" / "potion" / "hp_text" / "mp_text" / "potion_text") a small
+    "↺" reset button is added after the W/H stepper; clicking it
+    restores the built-in default placement so a ROI that ended up
+    off-screen can be recovered without manually retyping coords.
+    """
     widget = QWidget()
     row = QHBoxLayout(widget); row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(10)
@@ -67,6 +85,15 @@ def _coord_block(title_text: str,
     row.addWidget(_bind_axis("Y", get_y, set_y, 720))
     row.addWidget(_bind_axis("W", get_w, set_w, 1280))
     row.addWidget(_bind_axis("H", get_h, set_h, 720))
+
+    if reset_kind is not None:
+        reset_btn = _make_reset_button()
+        def _do_reset() -> None:
+            if mock_settings.reset_roi(reset_kind):
+                bus.settings_dirty.emit()
+        reset_btn.clicked.connect(_do_reset)
+        row.addWidget(reset_btn)
+
     row.addStretch(1)
     return widget
 
@@ -238,6 +265,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.hp_cap.y, lambda v: setattr(mock_settings.hp_cap, "y", v),
         lambda: mock_settings.hp_cap_w, lambda v: setattr(mock_settings, "hp_cap_w", v),
         lambda: mock_settings.hp_cap_h, lambda v: setattr(mock_settings, "hp_cap_h", v),
+        reset_kind="hp",
     ))
     # MP
     roi.add(_coord_block(
@@ -246,6 +274,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.mp_cap.y, lambda v: setattr(mock_settings.mp_cap, "y", v),
         lambda: mock_settings.mp_cap_w, lambda v: setattr(mock_settings, "mp_cap_w", v),
         lambda: mock_settings.mp_cap_h, lambda v: setattr(mock_settings, "mp_cap_h", v),
+        reset_kind="mp",
     ))
     # PK
     roi.add(_coord_block(
@@ -254,6 +283,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.pk.cap.y, lambda v: setattr(mock_settings.pk.cap, "y", v),
         lambda: mock_settings.pk.cap_w, lambda v: setattr(mock_settings.pk, "cap_w", v),
         lambda: mock_settings.pk.cap_h, lambda v: setattr(mock_settings.pk, "cap_h", v),
+        reset_kind="pk",
     ))
     # Potion
     roi.add(_coord_block(
@@ -262,6 +292,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.potion.cap.y, lambda v: setattr(mock_settings.potion.cap, "y", v),
         lambda: mock_settings.potion.cap_w, lambda v: setattr(mock_settings.potion, "cap_w", v),
         lambda: mock_settings.potion.cap_h, lambda v: setattr(mock_settings.potion, "cap_h", v),
+        reset_kind="potion",
     ))
     v.addWidget(roi)
 
@@ -299,6 +330,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.pk.cap.y, lambda v: setattr(mock_settings.pk.cap, "y", v),
         lambda: mock_settings.pk.cap_w, lambda v: setattr(mock_settings.pk, "cap_w", v),
         lambda: mock_settings.pk.cap_h, lambda v: setattr(mock_settings.pk, "cap_h", v),
+        reset_kind="pk",
     )
     ocr_card.add(ocr_pk_row)
 
@@ -357,8 +389,14 @@ def make_capture() -> tuple[QWidget, QWidget]:
     mode_cb.toggled.connect(_on_mode)
 
     # Auto-detect button (fills HP/MP/POTION text ROIs from the live frame)
+    # + "학습 관리" button to open the per-glyph instance manager.
     detect_row = QHBoxLayout(); detect_row.setSpacing(8)
     detect_btn = IconButton("자동 영역 검출", "crosshair", variant="primary")
+    manage_btn = IconButton("학습 관리", "settings", variant="secondary")
+    def _open_manage() -> None:
+        from quickcast.ui.components.ocr_manage import OcrManageDialog
+        OcrManageDialog(parent=main).exec()
+    manage_btn.clicked.connect(_open_manage)
     detect_status = QLabel("")
     reactive(detect_status, lambda: f"color:{T.palette.text_secondary};")
 
@@ -392,7 +430,9 @@ def make_capture() -> tuple[QWidget, QWidget]:
         else:
             detect_status.setText("자동 검출 실패 — 아래 박스 X/Y/W/H를 수동 입력해주세요")
     detect_btn.clicked.connect(_autodetect)
-    detect_row.addWidget(detect_btn); detect_row.addWidget(detect_status, 1)
+    detect_row.addWidget(detect_btn)
+    detect_row.addWidget(manage_btn)
+    detect_row.addWidget(detect_status, 1)
     ocr_card.add(detect_row)
 
     # Per-region calibration block builder
@@ -403,8 +443,9 @@ def make_capture() -> tuple[QWidget, QWidget]:
         get_w: Callable[[], int], set_w: Callable[[int], None],
         get_h: Callable[[], int], set_h: Callable[[int], None],
         suggested_truth: str,
+        reset_kind: Optional[str] = None,
     ) -> QWidget:
-        """One row: [HP] X[..] Y[..] W[..] H[..]  [학습]."""
+        """One row: [HP] X[..] Y[..] W[..] H[..]  [↺]  [학습]."""
         wrap = QWidget()
         row = QHBoxLayout(wrap); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(10)
 
@@ -417,6 +458,14 @@ def make_capture() -> tuple[QWidget, QWidget]:
         row.addWidget(_bind_axis("Y", get_y, set_y, 720))
         row.addWidget(_bind_axis("W", get_w, set_w, 1280))
         row.addWidget(_bind_axis("H", get_h, set_h, 720))
+
+        if reset_kind is not None:
+            reset_btn = _make_reset_button()
+            def _do_reset() -> None:
+                if mock_settings.reset_roi(reset_kind):
+                    bus.settings_dirty.emit()
+            reset_btn.clicked.connect(_do_reset)
+            row.addWidget(reset_btn)
 
         train = IconButton("학습", "settings", variant="secondary", size="sm")
         def _train() -> None:
@@ -487,6 +536,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.hp_text_cap_w, lambda v: setattr(mock_settings, "hp_text_cap_w", v),
         lambda: mock_settings.hp_text_cap_h, lambda v: setattr(mock_settings, "hp_text_cap_h", v),
         "",
+        reset_kind="hp_text",
     ))
     ocr_card.add(_ocr_region_row(
         "MP",
@@ -495,6 +545,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.mp_text_cap_w, lambda v: setattr(mock_settings, "mp_text_cap_w", v),
         lambda: mock_settings.mp_text_cap_h, lambda v: setattr(mock_settings, "mp_text_cap_h", v),
         "",
+        reset_kind="mp_text",
     ))
     ocr_card.add(_ocr_region_row(
         "물약",
@@ -503,6 +554,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.potion_text_cap_w, lambda v: setattr(mock_settings, "potion_text_cap_w", v),
         lambda: mock_settings.potion_text_cap_h, lambda v: setattr(mock_settings, "potion_text_cap_h", v),
         "",
+        reset_kind="potion_text",
     ))
 
     v.addWidget(ocr_card)

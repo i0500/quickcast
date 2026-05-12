@@ -175,6 +175,39 @@ def save_templates(templates: dict[str, list[np.ndarray]],
     return p
 
 
+def clear_label(label: str, path: Optional[Path] = None) -> int:
+    """Delete every saved instance of one glyph. Returns files removed.
+
+    Removes both the new multi-instance directory (digits/<label>/) and
+    the legacy flat file (digits/<label>.png) if present.
+    """
+    p = path or digits_dir()
+    n = 0
+    if not p.exists():
+        return 0
+    # Multi-instance directory
+    dn = p / _label_to_dirname(label)
+    if dn.exists() and dn.is_dir():
+        for png in list(dn.iterdir()):
+            if png.suffix.lower() == ".png":
+                try:
+                    png.unlink(); n += 1
+                except OSError:
+                    pass
+        try:
+            dn.rmdir()
+        except OSError:
+            pass
+    # Legacy flat file
+    legacy = p / _label_to_filename(label)
+    if legacy.exists():
+        try:
+            legacy.unlink(); n += 1
+        except OSError:
+            pass
+    return n
+
+
 def clear_templates(path: Optional[Path] = None) -> int:
     """Delete every learned mask (both layouts). Returns files removed."""
     p = path or digits_dir()
@@ -212,6 +245,6 @@ def instance_counts(path: Optional[Path] = None) -> dict[str, int]:
 
 
 __all__ = [
-    "digits_dir", "load_templates", "save_templates", "clear_templates",
-    "instance_counts",
+    "digits_dir", "load_templates", "save_templates",
+    "clear_label", "clear_templates", "instance_counts",
 ]

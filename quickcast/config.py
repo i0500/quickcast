@@ -96,6 +96,22 @@ def classify_aspect(width: int, height: int) -> str:
     return min(ASPECT_BUCKETS, key=lambda kv: abs(kv[0] - r))[1]
 
 
+# Built-in default placements for every ROI the UI exposes — used by
+# Settings.reset_roi() when the user hits the "↺" button next to a
+# coord row. Tuple is (x, y, w, h) in the 1280×720 normalised frame.
+# Tuned for the original 1280×720 Lineage W layout; users with other
+# resolutions then drag from these starting points.
+ROI_DEFAULTS: dict[str, tuple[int, int, int, int]] = {
+    "hp":          (78,   24, 160,  5),
+    "mp":          (76,   35, 157,  6),
+    "pk":          (1089, 561, 25, 25),
+    "potion":      (503,  646, 13, 13),
+    "hp_text":     (60,   18, 200, 18),
+    "mp_text":     (60,   40, 200, 18),
+    "potion_text": (560,  600, 64, 28),
+}
+
+
 def _aspect_ratio(label: str) -> float:
     """Return the w/h ratio for a bucket label (defaults to 16:9)."""
     for r, lab in ASPECT_BUCKETS:
@@ -315,6 +331,44 @@ class Settings(BaseModel):
     # completes or skips the overlay walkthrough. Help menu can
     # re-launch it.
     tutorial_completed: bool = False
+
+    def reset_roi(self, kind: str) -> bool:
+        """Reset one ROI rectangle to its built-in default placement.
+
+        ``kind`` is one of the keys in ROI_DEFAULTS. Returns True on
+        success, False for unknown kinds. Used by the capture-section
+        "↺ 초기화" buttons so the user can recover from a ROI that
+        ended up off-screen or in the wrong place without manually
+        re-typing the coordinates.
+        """
+        d = ROI_DEFAULTS.get(kind)
+        if d is None:
+            return False
+        x, y, w, h = d
+        if kind == "hp":
+            self.hp_cap = Point(x=x, y=y)
+            self.hp_cap_w, self.hp_cap_h = w, h
+        elif kind == "mp":
+            self.mp_cap = Point(x=x, y=y)
+            self.mp_cap_w, self.mp_cap_h = w, h
+        elif kind == "pk":
+            self.pk.cap = Point(x=x, y=y)
+            self.pk.cap_w, self.pk.cap_h = w, h
+        elif kind == "potion":
+            self.potion.cap = Point(x=x, y=y)
+            self.potion.cap_w, self.potion.cap_h = w, h
+        elif kind == "hp_text":
+            self.hp_text_cap = Point(x=x, y=y)
+            self.hp_text_cap_w, self.hp_text_cap_h = w, h
+        elif kind == "mp_text":
+            self.mp_text_cap = Point(x=x, y=y)
+            self.mp_text_cap_w, self.mp_text_cap_h = w, h
+        elif kind == "potion_text":
+            self.potion_text_cap = Point(x=x, y=y)
+            self.potion_text_cap_w, self.potion_text_cap_h = w, h
+        else:
+            return False
+        return True
 
     # ───────── ROI profile (per-aspect) ─────────
     def _snapshot_active_profile(self) -> RoiProfile:
@@ -568,6 +622,6 @@ def _default_slots() -> dict[str, Slot]:
 
 __all__ = [
     "Range", "Point", "Slot", "PkSlot", "PotionSlot",
-    "RoiProfile", "ASPECT_BUCKETS", "classify_aspect",
+    "RoiProfile", "ASPECT_BUCKETS", "ROI_DEFAULTS", "classify_aspect",
     "Alarm", "Settings", "CONFIG_PATH", "DATA_DIR",
 ]
