@@ -166,15 +166,36 @@ def auto_detect_all(frame_bgra: np.ndarray) -> dict[str, RegionGuess]:
 
     The returned regions are *text candidates* (already expanded around
     the bars). Caller writes them straight into Settings.*_text_cap.
+
+    MP fallback
+    -----------
+    The blue-bar detector misses when the MP bar is mostly empty
+    (player is at 0 MP) or when the game uses a less-saturated MP
+    colour. We fall back to "the same width as the HP bar, one bar
+    height below" whenever HP succeeded but MP didn't — that gets
+    the user a draggable seed instead of nothing.
     """
     h, w = frame_bgra.shape[:2]
     out: dict[str, RegionGuess] = {}
     hp_bar = detect_hp_bar(frame_bgra)
     if hp_bar is not None:
         out["hp"] = text_window_for_bar(hp_bar, w, h)
+
     mp_bar = detect_mp_bar(frame_bgra)
+    if mp_bar is None and hp_bar is not None:
+        # HP-relative fallback — MP sits directly below HP in almost
+        # every MMORPG HUD, at roughly the same width and height.
+        gap = max(2, hp_bar.h // 2)
+        mp_bar = RegionGuess(
+            x=hp_bar.x,
+            y=min(h - hp_bar.h, hp_bar.y + hp_bar.h + gap),
+            w=hp_bar.w,
+            h=hp_bar.h,
+            confidence=0.3,
+        )
     if mp_bar is not None:
         out["mp"] = text_window_for_bar(mp_bar, w, h)
+
     potion = detect_potion_count(frame_bgra)
     if potion is not None:
         out["potion"] = potion

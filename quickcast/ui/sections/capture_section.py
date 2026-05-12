@@ -232,21 +232,23 @@ def make_capture() -> tuple[QWidget, QWidget]:
                 subtitle="미리보기 위에서 사각형 드래그가 더 직관적")
 
     # HP
-    roi.add(_coord_block(
+    hp_row = _coord_block(
         "HP",
         lambda: mock_settings.hp_cap.x, lambda v: setattr(mock_settings.hp_cap, "x", v),
         lambda: mock_settings.hp_cap.y, lambda v: setattr(mock_settings.hp_cap, "y", v),
         lambda: mock_settings.hp_cap_w, lambda v: setattr(mock_settings, "hp_cap_w", v),
         lambda: mock_settings.hp_cap_h, lambda v: setattr(mock_settings, "hp_cap_h", v),
-    ))
+    )
+    roi.add(hp_row)
     # MP
-    roi.add(_coord_block(
+    mp_row = _coord_block(
         "MP",
         lambda: mock_settings.mp_cap.x, lambda v: setattr(mock_settings.mp_cap, "x", v),
         lambda: mock_settings.mp_cap.y, lambda v: setattr(mock_settings.mp_cap, "y", v),
         lambda: mock_settings.mp_cap_w, lambda v: setattr(mock_settings, "mp_cap_w", v),
         lambda: mock_settings.mp_cap_h, lambda v: setattr(mock_settings, "mp_cap_h", v),
-    ))
+    )
+    roi.add(mp_row)
     # PK
     roi.add(_coord_block(
         "PK",
@@ -256,14 +258,25 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.pk.cap_h, lambda v: setattr(mock_settings.pk, "cap_h", v),
     ))
     # Potion
-    roi.add(_coord_block(
+    potion_row = _coord_block(
         "물약",
         lambda: mock_settings.potion.cap.x, lambda v: setattr(mock_settings.potion.cap, "x", v),
         lambda: mock_settings.potion.cap.y, lambda v: setattr(mock_settings.potion.cap, "y", v),
         lambda: mock_settings.potion.cap_w, lambda v: setattr(mock_settings.potion, "cap_w", v),
         lambda: mock_settings.potion.cap_h, lambda v: setattr(mock_settings.potion, "cap_h", v),
-    ))
+    )
+    roi.add(potion_row)
     v.addWidget(roi)
+
+    # HP / MP / Potion rows are hidden when OCR mode is on (those
+    # readings come from the *_text_cap regions instead). PK has no
+    # OCR equivalent so its row stays visible in both modes.
+    legacy_rows = (hp_row, mp_row, potion_row)
+    def _refresh_legacy_visibility() -> None:
+        hide = bool(getattr(mock_settings, "ocr_mode", False))
+        for w in legacy_rows:
+            w.setVisible(not hide)
+    _refresh_legacy_visibility()
 
     # ────────────────── OCR (텍스트 기반 인식) ──────────────────
     ocr_card = Card(
@@ -286,6 +299,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
     mode_cb.setChecked(bool(getattr(mock_settings, "ocr_mode", False)))
     def _on_mode(checked: bool) -> None:
         mock_settings.ocr_mode = bool(checked)
+        _refresh_legacy_visibility()
         bus.settings_dirty.emit()
     mode_cb.toggled.connect(_on_mode)
     mode_row.addWidget(mode_cb); mode_row.addStretch(1)

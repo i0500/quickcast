@@ -208,15 +208,29 @@ class InteractivePreview(QWidget):
     def update_recognition(self, hp: int, mp: int,
                             pk_score: float, potion_score: float,
                             pk_thr: int, potion_thr: int) -> None:
-        """Latest recognition values to overlay near each ROI — short labels only."""
+        """Latest recognition values to overlay near each ROI — short labels only.
+
+        Label keys follow the *active* ROI set: in OCR mode the HP / MP /
+        potion readings are anchored to the text ROIs that are actually
+        drawn; in legacy mode they're anchored to the original boxes.
+        PK is the same key in both modes.
+        """
         pk_match = pk_score >= pk_thr
         potion_match = potion_score >= potion_thr
-        self._roi_value_text = {
-            "hp": f"HP {hp}%",
-            "mp": f"MP {mp}%",
-            "pk": "PK 전투" if pk_match else "PK 보통",
-            "potion": "물약 없음" if potion_match else "물약 있음",
-        }
+        if getattr(self.settings, "ocr_mode", False):
+            self._roi_value_text = {
+                "hp_text": f"HP {hp}%",
+                "mp_text": f"MP {mp}%",
+                "pk": "PK 전투" if pk_match else "PK 보통",
+                "potion_text": "물약 없음" if potion_match else "물약 있음",
+            }
+        else:
+            self._roi_value_text = {
+                "hp": f"HP {hp}%",
+                "mp": f"MP {mp}%",
+                "pk": "PK 전투" if pk_match else "PK 보통",
+                "potion": "물약 없음" if potion_match else "물약 있음",
+            }
         self.update()
 
     # ───────── coordinate mapping ─────────
@@ -253,17 +267,26 @@ class InteractivePreview(QWidget):
         return QPoint(fx, fy)
 
     # ───────── hit testing ─────────
-    # PK / Potion ROI are search regions now (matchTemplate runs inside
-    # them and locks onto the icon's exact position automatically), so
-    # all four ROI sizes are user-resizable. Empty tuple = nothing locked.
-    _SIZE_LOCKED_IDS: tuple[str, ...] = ()
+    # PK / Potion ROI sizes are pinned to the embedded template image's
+    # dimensions, so allowing the user to resize the box would always
+    # mismatch the template. Lock them to MOVE-only — corners and edges
+    # don't return resize handles for these IDs.
+    _SIZE_LOCKED_IDS: tuple[str, ...] = ("pk", "potion")
 
     def _active_roi_defs(self) -> list[tuple[str, str, QColor]]:
-        """Primary ROIs always; OCR text ROIs only when ocr_mode is on."""
-        defs = list(ROI_DEFS)
+        """ROI set to draw / hit-test for the current mode.
+
+        - OCR off (legacy): show HP / MP / PK / POTION.
+        - OCR on: hide HP / MP / POTION (now read from text ROIs);
+          show PK (no text source) and the three text ROIs.
+        """
         if getattr(self.settings, "ocr_mode", False):
+            defs: list[tuple[str, str, QColor]] = [
+                d for d in ROI_DEFS if d[0] == "pk"
+            ]
             defs.extend(OCR_ROI_DEFS)
-        return defs
+            return defs
+        return list(ROI_DEFS)
 
     def _hit_test(self, fx: int, fy: int) -> tuple[Optional[str], int]:
         """Return (roi_id, hit_zone) for the topmost matching ROI under (fx, fy)."""

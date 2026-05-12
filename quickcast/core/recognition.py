@@ -326,36 +326,26 @@ class Recognizer:
         sura_offset_hp = 5 if settings.sura_mode else 0
         sura_offset_mp = 6 if settings.sura_mode else 0
 
-        # Auto-correct ROI dims ONLY when smaller than template. The ROI
-        # is now a *search region* — users keep it bigger than the
-        # template on purpose so the matcher can hunt for the icon's
-        # exact position. Shrinking the ROI to the template size would
-        # defeat the whole "set once, auto-track" design.
+        # PK / Potion: ROI must match the template exactly. We tried a
+        # "ROI as search-region" mode that lets the matcher hunt inside
+        # a larger box, but it didn't behave reliably in real games and
+        # the user rolled it back. So we force the ROI to the template
+        # size — the user has to position the small box precisely.
         from quickcast.utils.logger import logger
         if self._pk_target is not None:
             th, tw = self._pk_target.shape[:2]
-            if settings.pk.cap_w < tw or settings.pk.cap_h < th:
+            if settings.pk.cap_w != tw or settings.pk.cap_h != th:
                 if not _ROI_FIX_REPORTED.get("pk"):
-                    logger.info(
-                        f"🔧 PK 박스가 템플릿보다 작아 최소 크기로 확장: "
-                        f"{settings.pk.cap_w}×{settings.pk.cap_h} → "
-                        f"{max(settings.pk.cap_w, tw)}×{max(settings.pk.cap_h, th)}"
-                    )
+                    logger.info(f"🔧 PK 박스 크기 자동 보정: {settings.pk.cap_w}×{settings.pk.cap_h} → {tw}×{th}")
                     _ROI_FIX_REPORTED["pk"] = True
-                settings.pk.cap_w = max(int(settings.pk.cap_w), int(tw))
-                settings.pk.cap_h = max(int(settings.pk.cap_h), int(th))
+                settings.pk.cap_w = int(tw); settings.pk.cap_h = int(th)
         if self._potion_target is not None:
             th, tw = self._potion_target.shape[:2]
-            if settings.potion.cap_w < tw or settings.potion.cap_h < th:
+            if settings.potion.cap_w != tw or settings.potion.cap_h != th:
                 if not _ROI_FIX_REPORTED.get("potion"):
-                    logger.info(
-                        f"🔧 물약 박스가 템플릿보다 작아 최소 크기로 확장: "
-                        f"{settings.potion.cap_w}×{settings.potion.cap_h} → "
-                        f"{max(settings.potion.cap_w, tw)}×{max(settings.potion.cap_h, th)}"
-                    )
+                    logger.info(f"🔧 물약 박스 크기 자동 보정: {settings.potion.cap_w}×{settings.potion.cap_h} → {tw}×{th}")
                     _ROI_FIX_REPORTED["potion"] = True
-                settings.potion.cap_w = max(int(settings.potion.cap_w), int(tw))
-                settings.potion.cap_h = max(int(settings.potion.cap_h), int(th))
+                settings.potion.cap_w = int(tw); settings.potion.cap_h = int(th)
 
         hp_roi = frame.crop(settings.hp_cap, settings.hp_cap_w, settings.hp_cap_h, sura_offset_hp)
         mp_roi = frame.crop(settings.mp_cap, settings.mp_cap_w, settings.mp_cap_h, sura_offset_mp)
