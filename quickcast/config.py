@@ -65,12 +65,12 @@ class RoiProfile(BaseModel):
     mp_cap: Point = Field(default_factory=lambda: Point(x=76, y=35))
     mp_cap_w: int = 157
     mp_cap_h: int = 6
-    pk_cap: Point = Field(default_factory=lambda: Point(x=1042, y=541))
-    pk_cap_w: int = 89
-    pk_cap_h: int = 63
-    potion_cap: Point = Field(default_factory=lambda: Point(x=443, y=616))
-    potion_cap_w: int = 84
-    potion_cap_h: int = 65
+    pk_cap: Point = Field(default_factory=lambda: Point(x=1062, y=534))
+    pk_cap_w: int = 43
+    pk_cap_h: int = 45
+    potion_cap: Point = Field(default_factory=lambda: Point(x=483, y=629))
+    potion_cap_w: int = 41
+    potion_cap_h: int = 40
 
 
 # Coarse aspect-ratio buckets used to key ROI profiles. The frame is
@@ -104,8 +104,8 @@ def classify_aspect(width: int, height: int) -> str:
 ROI_DEFAULTS: dict[str, tuple[int, int, int, int]] = {
     "hp":          (78,   24, 160,  5),
     "mp":          (76,   35, 157,  6),
-    "pk":          (1042, 541, 89, 63),
-    "potion":      (443,  616, 84, 65),
+    "pk":          (1062, 534, 43, 45),
+    "potion":      (483,  629, 41, 40),
     "hp_text":     (60,   18, 200, 18),
     "mp_text":     (60,   40, 200, 18),
     "potion_text": (560,  600, 64, 28),
@@ -145,9 +145,9 @@ class PkSlot(BaseModel):
     delay: float = 0.2
     cooltime: float = 3.0
     repeat: bool = True
-    cap: Point = Field(default_factory=lambda: Point(x=1042, y=541))
-    cap_w: int = 89
-    cap_h: int = 63
+    cap: Point = Field(default_factory=lambda: Point(x=1062, y=534))
+    cap_w: int = 43
+    cap_h: int = 45
     threshold: int = 3_050_000
 
 
@@ -159,13 +159,13 @@ class PotionSlot(BaseModel):
     key: str = "0"
     count: int = 3
     delay: float = 0.2
-    cap: Point = Field(default_factory=lambda: Point(x=443, y=616))
-    cap_w: int = 84
-    cap_h: int = 65
+    cap: Point = Field(default_factory=lambda: Point(x=483, y=629))
+    cap_w: int = 41
+    cap_h: int = 40
     # NORMED template-match (recognition.py) returns 0..250_000 for
-    # potion. 110_000 ≈ 44% NORMED — calibrated against the real game
+    # potion. 150_000 ≈ 60% NORMED — calibrated against the real game
     # icon at 1280×720 client resolution.
-    threshold: int = 110_000
+    threshold: int = 150_000
 
 
 class Alarm(BaseModel):
