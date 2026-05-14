@@ -168,6 +168,30 @@ class PotionSlot(BaseModel):
     threshold: int = 150_000
 
 
+class OverlayClose(BaseModel):
+    """Auto-dismiss a centered overlay popup via template detection + key press.
+
+    Pet whistle bonding, item-acquired chest, and similar centred popups
+    swallow slot input until the user closes them. When the configured
+    template (data/targets/{overlay_id}.png) appears inside ``cap`` with
+    score >= ``threshold``, we send ``close_key`` (default ESC) so the
+    slot loop can resume. ``cooldown_seconds`` throttles repeats so we
+    don't spam the game with ESCs while the popup is dismissing.
+
+    Coordinates default to a tight box around the pet-whistle paw at
+    the top-centre of the 1280×720 normalised frame (user-calibrated
+    against Lineage W's actual popup placement). Item-acquired uses
+    the same default since its chest icon sits in the same area.
+    """
+    enabled: bool = False
+    cap: Point = Field(default_factory=lambda: Point(x=591, y=100))
+    cap_w: int = 114
+    cap_h: int = 93
+    threshold: int = 3_000_000   # legacy magnitude, scale_legacy=5_000_000 (~0.6 NORMED)
+    close_key: str = "esc"
+    cooldown_seconds: float = 2.0
+
+
 class Alarm(BaseModel):
     id: str
     label: str
@@ -336,6 +360,19 @@ class Settings(BaseModel):
     # Auto-dismiss "item acquired" popup — click a fixed game-frame
     # coord every N seconds while the macro is running.
     item_close: ItemCloseSettings = Field(default_factory=ItemCloseSettings)
+    # Detection-driven overlay close — sends ESC (or configured key)
+    # whenever a template like the pet-whistle paw / item-acquired chest
+    # appears in the centre of the screen. Replaces / complements the
+    # legacy interval-based item_close. Keys correspond to template files
+    # under data/targets/{key}.png. New entries can be added by dropping
+    # a new template + flipping `enabled` in userdata.json — no code
+    # changes required.
+    overlay_closes: dict[str, OverlayClose] = Field(
+        default_factory=lambda: {
+            "pet_whistle": OverlayClose(),
+            "item_acquired": OverlayClose(),
+        }
+    )
     notify_on_alarm_toast: bool = True   # Windows tray toast on alarm
     notify_on_action_toast: bool = False  # Optional toast when slot fires
 
@@ -645,6 +682,6 @@ def _default_slots() -> dict[str, Slot]:
 
 __all__ = [
     "Range", "Point", "Slot", "PkSlot", "PotionSlot", "ItemCloseSettings",
-    "RoiProfile", "ASPECT_BUCKETS", "ROI_DEFAULTS", "classify_aspect",
-    "Alarm", "Settings", "CONFIG_PATH", "DATA_DIR",
+    "OverlayClose", "RoiProfile", "ASPECT_BUCKETS", "ROI_DEFAULTS",
+    "classify_aspect", "Alarm", "Settings", "CONFIG_PATH", "DATA_DIR",
 ]

@@ -98,6 +98,15 @@ class _SignalBus(QObject):
     # User clicked the "정지" button next to a repeating alarm row —
     # AppWindow handles by killing that label's timer.
     alarm_stop_request = Signal(str)          # label
+    # Overlay-close detection results — emitted per frame from the
+    # capture loop with the latest score + detected flag per overlay
+    # id (pet_whistle, item_acquired, …). Capture section's overlay
+    # card reads it to update "점수: N" labels.
+    overlay_scores = Signal(dict)             # {ov_id: {"score": int, "detected": bool}}
+    # User clicked the per-overlay "테스트 ESC" button. AppWindow
+    # routes a single close_key press through the active input backend
+    # so the user can verify the wire without a real popup.
+    overlay_close_test = Signal(str, str)     # (ov_id, close_key)
 
 
 bus = _SignalBus()

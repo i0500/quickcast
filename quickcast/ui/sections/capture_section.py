@@ -607,8 +607,218 @@ def make_capture() -> tuple[QWidget, QWidget]:
     if not OCR_FEATURE_ENABLED:
         ocr_card.setVisible(False)
 
+    # ────────────────── 오버레이 자동 닫기 ──────────────────
+    overlay_card = _build_overlay_close_card()
+    v.addWidget(overlay_card)
+
     v.addStretch(1)
     return sidebar, main
+
+
+# ────────── overlay-close card ──────────
+# Friendly labels for the known overlay ids. Adding a new overlay only
+# needs (a) a template png under data/targets/ and (b) an entry here
+# (plus a Settings.overlay_closes default if it should ship enabled).
+_OVERLAY_LABELS: dict[str, str] = {
+    "pet_whistle": "펫 호루라기 (교감 성공 발바닥)",
+    "item_acquired": "아이템 획득 (보상 상자)",
+}
+
+
+def _build_overlay_close_card() -> "QWidget":
+    """오버레이 자동 닫기 — 펫 호루라기 / 아이템 획득 등 중앙 팝업 감지 + ESC."""
+    from quickcast.config import OverlayClose, Point
+    from quickcast.core.recognition import TARGETS_DIR
+    from quickcast.ui.ios_toggle import IOSToggle
+
+    card = Card(
+        "오버레이 자동 닫기",
+        subtitle=(
+            "중앙 팝업(펫 호루라기 발바닥, 아이템 획득 상자 등)이 뜨면 "
+            "ESC로 자동 닫아서 슬롯 스킬이 다시 동작하도록 합니다."
+        ),
+        inline_subtitle=False,
+    )
+
+    # Live overlay scores feed from the capture loop via bus.live_frame
+    # → state_bridge → bus.overlay_scores (emitted as a dict).
+    score_labels: dict[str, QLabel] = {}
+
+    def _ensure_default_roi(ov: "OverlayClose") -> None:
+        """Seed sane defaults if userdata.json shipped zero rectangle."""
+        if ov.cap_w <= 0 or ov.cap_h <= 0:
+            ov.cap = Point(x=591, y=100)
+            ov.cap_w = 114
+            ov.cap_h = 93
+
+    def _make_row(ov_id: str) -> QWidget:
+        # Pull/create the OverlayClose entry — gracefully handles a
+        # legacy userdata.json that predates this feature.
+        oc_dict = getattr(mock_settings, "overlay_closes", None)
+        if oc_dict is None:
+            mock_settings.overlay_closes = {}    # type: ignore[attr-defined]
+            oc_dict = mock_settings.overlay_closes
+        if ov_id not in oc_dict:
+            oc_dict[ov_id] = OverlayClose()
+        ov = oc_dict[ov_id]
+        _ensure_default_roi(ov)
+
+        template_path = TARGETS_DIR / f"{ov_id}.png"
+        has_template = template_path.exists()
+
+        wrap = QWidget()
+        col = QVBoxLayout(wrap); col.setContentsMargins(0, 0, 0, 0); col.setSpacing(6)
+
+        # Top row: [toggle] [label] [상태] [임계값] [테스트]
+        top = QHBoxLayout(); top.setSpacing(8); top.setContentsMargins(0, 0, 0, 0)
+        tg = IOSToggle(width=44, height=24)
+        tg.set_state(bool(ov.enabled), animate=False)
+
+        name = QLabel(_OVERLAY_LABELS.get(ov_id, ov_id))
+        f = QFont(); f.setBold(True); name.setFont(f)
+        reactive(name, lambda: f"color:{T.palette.text_primary};")
+
+        badge = QLabel("[템플릿 없음]" if not has_template else "")
+        reactive(
+            badge,
+            lambda has=has_template: (
+                f"color:{T.palette.text_tertiary}; font-size:11px;"
+                if has else
+                f"color:{T.palette.state_warning}; font-size:11px;"
+            ),
+        )
+
+        score = QLabel("점수: -")
+        reactive(score, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono};")
+        score_labels[ov_id] = score
+
+        # Sensitivity slider — 1..100 % maps linearly to 0..5_000_000
+        # legacy threshold magnitude (same scale as PK so users get the
+        # same mental model: low %=느슨, 높을수록 엄격).
+        from PySide6.QtWidgets import QSlider
+        _OV_SCALE = 50_000   # 1 % step = 50,000 legacy units (PK parity)
+        sens_lbl = QLabel("감지 민감도")
+        reactive(sens_lbl, lambda: f"color:{T.palette.text_secondary}; font-size:12px;")
+        cur_pct = max(1, min(100, round(int(ov.threshold) / _OV_SCALE)))
+        thr = QSlider(Qt.Horizontal)
+        thr.setRange(1, 100)
+        thr.setValue(cur_pct)
+        thr.setMinimumWidth(120)
+        thr.setSingleStep(1); thr.setPageStep(5)
+        thr.setTickInterval(10); thr.setTickPosition(QSlider.NoTicks)
+        val_lbl = QLabel(f"{cur_pct}% ({int(ov.threshold):,})")
+        val_lbl.setFixedWidth(124); val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        reactive(
+            val_lbl,
+            lambda: f"color:{T.palette.text_tertiary}; "
+                     f"font-family:{T.type.mono}; font-size:11px;",
+        )
+
+        def _on_thr(pct: int, _ov=ov, _lbl=val_lbl) -> None:
+            new = int(pct) * _OV_SCALE
+            _lbl.setText(f"{pct}% ({new:,})")
+            if int(_ov.threshold) != new:
+                _ov.threshold = new
+                bus.settings_dirty.emit()
+        thr.valueChanged.connect(_on_thr)
+
+        def _slider_qss() -> str:
+            p = T.palette
+            return (
+                f"QSlider::groove:horizontal {{ background:{p.bg_input};"
+                f" border-radius:3px; height:6px; }}"
+                f"QSlider::sub-page:horizontal {{ background:{p.accent_default};"
+                f" border-radius:3px; }}"
+                f"QSlider::handle:horizontal {{ background:{p.accent_default};"
+                f" border:2px solid {p.bg_canvas}; width:14px; height:14px;"
+                f" margin:-5px 0; border-radius:8px; }}"
+                f"QSlider::handle:horizontal:hover {{ background:{p.accent_hover}; }}"
+            )
+        reactive(thr, _slider_qss)
+
+        test_btn = IconButton("테스트 ESC", "x", size="sm")
+        test_btn.setToolTip("게임창에 close_key (기본 ESC)을 한 번 보냅니다.")
+
+        def _on_test(_=None, _id=ov_id, _ov=ov) -> None:
+            try:
+                bus.overlay_close_test.emit(_id, (_ov.close_key or "esc"))
+            except Exception:
+                pass
+        test_btn.clicked.connect(_on_test)
+
+        def _on_toggle(on: bool, _ov=ov, _has=has_template) -> None:
+            if _ov.enabled == on:
+                return
+            if on and not _has:
+                # Re-check at runtime in case the user just dropped the
+                # template png. Cheap stat call; far better than letting
+                # the toggle silently do nothing on first session.
+                if not template_path.exists():
+                    from quickcast.utils.logger import logger
+                    logger.warning(
+                        f"⚠️ {ov_id} 템플릿 미존재 — data/targets/{ov_id}.png 필요"
+                    )
+                    tg.set_state(False, animate=False)
+                    return
+            _ov.enabled = on
+            bus.settings_dirty.emit()
+        tg.toggled.connect(_on_toggle)
+
+        top.addWidget(tg)
+        top.addWidget(name)
+        if badge.text():
+            top.addWidget(badge)
+        top.addStretch(1)
+        top.addWidget(score)
+        top.addSpacing(8)
+        top.addWidget(test_btn)
+        col.addLayout(top)
+
+        # Sub-row: sensitivity slider gets its own line so it has enough
+        # width to drag cleanly (the row above is already busy).
+        sens_row = QHBoxLayout(); sens_row.setContentsMargins(0, 0, 0, 0); sens_row.setSpacing(8)
+        sens_row.addWidget(sens_lbl)
+        sens_row.addWidget(thr, stretch=1)
+        sens_row.addWidget(val_lbl)
+        col.addLayout(sens_row)
+
+        # Coord row — search ROI in 1280×720 normalised space.
+        def _gx(_ov=ov) -> int: return _ov.cap.x
+        def _sx(v: int, _ov=ov) -> None: _ov.cap.x = v
+        def _gy(_ov=ov) -> int: return _ov.cap.y
+        def _sy(v: int, _ov=ov) -> None: _ov.cap.y = v
+        def _gw(_ov=ov) -> int: return _ov.cap_w
+        def _sw(v: int, _ov=ov) -> None: _ov.cap_w = v
+        def _gh(_ov=ov) -> int: return _ov.cap_h
+        def _sh(v: int, _ov=ov) -> None: _ov.cap_h = v
+        coord = _coord_block("ROI", _gx, _sx, _gy, _sy, _gw, _sw, _gh, _sh)
+        col.addWidget(coord)
+
+        return wrap
+
+    for ov_id in ("pet_whistle", "item_acquired"):
+        card.add(_make_row(ov_id))
+
+    # Wire live overlay scores from the analysis stream into the score
+    # labels. Throttled by the capture loop's fps already; no extra
+    # debounce needed at the UI layer.
+    def _on_overlay_scores(scores: dict) -> None:
+        for ov_id, lbl in score_labels.items():
+            entry = scores.get(ov_id) if scores else None
+            if entry is None:
+                lbl.setText("점수: -")
+                continue
+            s = int(entry.get("score", 0) or 0)
+            hit = bool(entry.get("detected"))
+            lbl.setText(f"점수: {s:,}{'  ✓' if hit else ''}")
+    try:
+        bus.overlay_scores.connect(_on_overlay_scores)
+    except Exception:
+        # bus.overlay_scores may not exist yet on hot-reload; controller
+        # registers it on first emit anyway.
+        pass
+
+    return card
 
 
 __all__ = ["make_capture"]

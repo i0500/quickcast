@@ -136,6 +136,9 @@ class AppWindow(AppShell):
         # "테스트" button in the item-close card → controller fires
         # one click at the saved coord immediately (no interval wait).
         bus.item_close_test_request.connect(self._on_item_close_test)
+        # "테스트 ESC" button next to each overlay-close row — fires the
+        # configured close_key once via the active input backend.
+        bus.overlay_close_test.connect(self._on_overlay_close_test)
         # Periodic safety save (every 30s, only if dirty since last save).
         self._dirty = False
         self._poll_timer = QTimer(self); self._poll_timer.setInterval(30_000)
@@ -343,6 +346,15 @@ class AppWindow(AppShell):
             # Re-broadcast on bus so secondary previews (fullscreen,
             # picture-in-picture, …) can mirror the same frame.
             bus.live_frame.emit(image, analysis, fps)
+            # Forward per-overlay match scores so the capture section's
+            # overlay-close card can update its live "점수: N" labels.
+            ov = getattr(analysis, "overlay_matches", None)
+            if ov:
+                payload = {
+                    ov_id: {"score": int(m.score), "detected": bool(m.detected)}
+                    for ov_id, m in ov.items()
+                }
+                bus.overlay_scores.emit(payload)
 
         self._mb.sig.connect(_on_ui, Qt.QueuedConnection)
         self._frame_mb.sig.connect(_on_frame, Qt.QueuedConnection)
@@ -661,6 +673,27 @@ class AppWindow(AppShell):
             f"단계 #{idx + 1} '{step.label}' 테스트 클릭 → ({step.x},{step.y})",
             level="success", duration_ms=2000,
         )
+
+    # ───────── overlay-close test fire ─────────
+    def _on_overlay_close_test(self, ov_id: str, close_key: str) -> None:
+        """User clicked '테스트 ESC' for one of the overlay-close rows.
+        Send the configured close_key once through the active input
+        backend so they can verify the wire end-to-end (window
+        targeting, key path) without triggering a real popup."""
+        if self.controller is None:
+            return
+        key = (close_key or "esc").strip().lower() or "esc"
+        try:
+            self.controller.input.send_key(key)
+            NotificationCenter.toast(
+                f"🚪 {ov_id} 테스트 — '{key}' 발사",
+                level="success", duration_ms=2000,
+            )
+        except Exception:
+            logger.exception(f"overlay-close test fire failed: {ov_id}")
+            NotificationCenter.toast(
+                "오버레이 테스트 실패 — 로그 확인", level="danger", duration_ms=3000,
+            )
 
     # ───────── item-close test fire ─────────
     def _on_item_close_test(self) -> None:

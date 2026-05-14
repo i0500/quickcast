@@ -7,7 +7,7 @@ loop pipeline it replaces.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +18,22 @@ from quickcast.config import PkSlot, PotionSlot, Settings
 from quickcast.core.capture import Frame
 
 TARGETS_DIR = Path(__file__).resolve().parent.parent / "data" / "targets"
+
+
+@dataclass
+class OverlayMatch:
+    """One overlay's match result for a frame.
+
+    Pet-whistle paw, item-acquired chest, and any other future centred
+    popup template all produce one of these per frame they're enabled.
+    ``detected`` is True when ``score`` >= the overlay's threshold.
+    ``match_xy`` is (-1, -1) when no scan ran (disabled, template missing,
+    ROI too small).
+    """
+    detected: bool = False
+    score: float = 0.0
+    match_xy: tuple[int, int] = (-1, -1)
+    match_scale: float = 1.0
 
 
 @dataclass
@@ -40,6 +56,9 @@ class FrameAnalysis:
     # ≠ 1.0 the user's calibration is at the wrong zoom level.
     pk_match_scale: float = 1.0
     potion_match_scale: float = 1.0
+    # Per-overlay detection results (pet_whistle, item_acquired, …).
+    # Empty when no overlay is enabled or templates aren't loaded.
+    overlay_matches: dict = field(default_factory=dict)
 
 
 def _hp_ratio(roi_bgra: np.ndarray) -> int:
@@ -276,6 +295,19 @@ class Recognizer:
     ) -> None:
         self._pk_target = self._load_bgra(pk_target_path)
         self._potion_target = self._load_bgra(potion_target_path)
+        # Overlay templates — keyed by overlay id (matches the keys in
+        # settings.overlay_closes). Any file under data/targets/ whose
+        # stem is not pk/potion is treated as an overlay template; the
+        # user can drop a new png and a matching settings entry to
+        # extend without code changes.
+        self._overlay_targets: dict[str, np.ndarray] = {}
+        for p in sorted(TARGETS_DIR.glob("*.png")):
+            stem = p.stem.lower()
+            if stem in ("pk", "potion"):
+                continue
+            img = self._load_bgra(p)
+            if img is not None:
+                self._overlay_targets[stem] = img
         from quickcast.utils.logger import logger
         # Single concise init line — only warn when a template is missing.
         pk_ok = self._pk_target is not None
@@ -284,6 +316,10 @@ class Recognizer:
             logger.warning(
                 f"⚠️ 템플릿 로드 실패 — PK: {'OK' if pk_ok else 'FAIL'},"
                 f" 물약: {'OK' if po_ok else 'FAIL'}"
+            )
+        if self._overlay_targets:
+            logger.info(
+                f"🎯 오버레이 템플릿 로드: {', '.join(self._overlay_targets)}"
             )
         self._last_score_log_at = 0.0
         # Throttle the per-frame potion-OCR debug log to once per ~2s
@@ -549,6 +585,42 @@ class Recognizer:
             final_potion_empty = round(potion_score) >= settings.potion.threshold
             final_potion_score = potion_score
 
+        # ── Overlay close detection ────────────────────────────────
+        # For each enabled overlay (pet_whistle / item_acquired / …)
+        # scan its search region for the template. Match magnitude
+        # mirrors PK (scale_legacy=5_000_000) so thresholds are
+        # interchangeable mentally.
+        overlay_matches: dict[str, OverlayMatch] = {}
+        overlay_cfg = getattr(settings, "overlay_closes", None) or {}
+        for ov_id, ov in overlay_cfg.items():
+            if not getattr(ov, "enabled", False):
+                continue
+            tmpl = self._overlay_targets.get(ov_id)
+            if tmpl is None:
+                continue
+            # Auto-expand search ROI to at least template size, same as
+            # PK / Potion above. Centred popups rarely move, but a user
+            # drawing a tiny box shouldn't silently fail to match.
+            th, tw = tmpl.shape[:2]
+            if ov.cap_w < tw:
+                ov.cap_w = int(tw)
+            if ov.cap_h < th:
+                ov.cap_h = int(th)
+            roi = frame.crop(ov.cap, ov.cap_w, ov.cap_h)
+            score, local_xy, scale = _template_search(
+                roi, tmpl,
+                scale_legacy=5_000_000.0, _kind=f"overlay:{ov_id}",
+            )
+            match_xy: tuple[int, int] = (-1, -1)
+            if local_xy != (-1, -1):
+                match_xy = (ov.cap.x + local_xy[0], ov.cap.y + local_xy[1])
+            overlay_matches[ov_id] = OverlayMatch(
+                detected=round(score) >= int(ov.threshold),
+                score=score,
+                match_xy=match_xy,
+                match_scale=scale,
+            )
+
         return FrameAnalysis(
             hp=final_hp,
             mp=final_mp,
@@ -560,7 +632,8 @@ class Recognizer:
             potion_match_xy=potion_match_xy,
             pk_match_scale=pk_match_scale,
             potion_match_scale=potion_match_scale,
+            overlay_matches=overlay_matches,
         )
 
 
-__all__ = ["Recognizer", "FrameAnalysis", "TARGETS_DIR"]
+__all__ = ["Recognizer", "FrameAnalysis", "OverlayMatch", "TARGETS_DIR"]

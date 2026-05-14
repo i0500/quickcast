@@ -41,6 +41,15 @@ OCR_ROI_DEFS = [
     ("potion_text", "물약 텍스트",   QColor(170, 220, 170)),   # light green
 ]
 
+# Overlay-close ROIs (pet whistle paw / item acquired chest / …). One
+# colour per known overlay id — only drawn when that overlay's enabled
+# flag is True so the preview stays uncluttered. Keys use the
+# "overlay:{ov_id}" namespace to avoid colliding with HUD ROI ids.
+OVERLAY_ROI_DEFS: list[tuple[str, str, QColor]] = [
+    ("overlay:pet_whistle",   "펫 호루라기",   QColor(255, 145, 215)),   # pink
+    ("overlay:item_acquired", "아이템 획득",   QColor(255, 200, 100)),   # amber
+]
+
 
 @dataclass
 class _RoiRect:
@@ -174,6 +183,12 @@ class InteractivePreview(QWidget):
         if roi_id == "potion_text":
             return _RoiRect(s.potion_text_cap.x, s.potion_text_cap.y,
                             s.potion_text_cap_w, s.potion_text_cap_h)
+        if roi_id.startswith("overlay:"):
+            ov_id = roi_id.split(":", 1)[1]
+            ov = (getattr(s, "overlay_closes", None) or {}).get(ov_id)
+            if ov is None:
+                return _RoiRect(0, 0, 0, 0)
+            return _RoiRect(ov.cap.x, ov.cap.y, ov.cap_w, ov.cap_h)
         raise KeyError(roi_id)
 
     def _set_roi(self, roi_id: str, r: _RoiRect) -> None:
@@ -212,6 +227,12 @@ class InteractivePreview(QWidget):
         elif roi_id == "potion_text":
             s.potion_text_cap = Point(x=cx, y=cy)
             s.potion_text_cap_w, s.potion_text_cap_h = w, h
+        elif roi_id.startswith("overlay:"):
+            ov_id = roi_id.split(":", 1)[1]
+            ov = (getattr(s, "overlay_closes", None) or {}).get(ov_id)
+            if ov is not None:
+                ov.cap = Point(x=cx, y=cy)
+                ov.cap_w, ov.cap_h = w, h
         self.roi_changed.emit(roi_id)
 
     # ───────── frame updates ─────────
@@ -325,14 +346,24 @@ class InteractivePreview(QWidget):
         - OCR off (legacy): show HP / MP / PK / POTION.
         - OCR on: hide HP / MP / POTION (now read from text ROIs);
           show PK (no text source) and the three text ROIs.
+        - Overlay-close ROIs: appended whenever their enabled flag is
+          True, regardless of OCR mode — they're a separate detection
+          pipeline and the user toggles them per-overlay.
         """
         if getattr(self.settings, "ocr_mode", False):
             defs: list[tuple[str, str, QColor]] = [
                 d for d in ROI_DEFS if d[0] == "pk"
             ]
             defs.extend(OCR_ROI_DEFS)
-            return defs
-        return list(ROI_DEFS)
+        else:
+            defs = list(ROI_DEFS)
+        ovc = getattr(self.settings, "overlay_closes", None) or {}
+        for roi_id, label, color in OVERLAY_ROI_DEFS:
+            ov_key = roi_id.split(":", 1)[1]
+            ov = ovc.get(ov_key)
+            if ov is not None and getattr(ov, "enabled", False):
+                defs.append((roi_id, label, color))
+        return defs
 
     def _hit_test(self, fx: int, fy: int) -> tuple[Optional[str], int]:
         """Return (roi_id, hit_zone) for the topmost matching ROI under (fx, fy)."""
@@ -684,6 +715,11 @@ class InteractivePreview(QWidget):
             "mp_text": ("right", "below", "above", "left"),
             "potion_text": ("above", "right", "below", "left"),
         }
+        # Default placement order for any ROI not in the hard-coded
+        # prefs (e.g. "overlay:pet_whistle"). Overlay boxes live in
+        # the top centre of the frame so "below" reads cleanly without
+        # clipping off the top edge.
+        _SIDE_FALLBACK = ("below", "above", "right", "left")
         widget_rect = QRect(0, 0, self.width(), self.height())
 
         def _place(side: str, around: QRect, sz_w: int, sz_h: int) -> QRect:
@@ -703,7 +739,8 @@ class InteractivePreview(QWidget):
             wrect = rect_widget[roi_id]
 
             best: Optional[QRect] = None
-            for side in SIDE_PREFS[roi_id]:
+            sides = SIDE_PREFS.get(roi_id, _SIDE_FALLBACK)
+            for side in sides:
                 cand = _place(side, wrect, tw, th)
                 if not widget_rect.contains(cand):
                     continue
@@ -716,7 +753,8 @@ class InteractivePreview(QWidget):
                     best = cand; break
             if best is None:
                 # Fallback: nudge slightly so it's at least visible
-                best = _place(SIDE_PREFS[roi_id][0], wrect, tw, th)
+                first_side = SIDE_PREFS.get(roi_id, _SIDE_FALLBACK)[0]
+                best = _place(first_side, wrect, tw, th)
                 # Stack downward if it overlaps prior labels
                 while any(best.intersects(prev) for prev in placed) and best.bottom() < self.height():
                     best.translate(0, th + 2)

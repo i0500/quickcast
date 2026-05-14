@@ -63,6 +63,12 @@ class MacroController:
         # popup-dismiss feature to settings.item_close.interval_seconds
         # so we don't spam the game window with clicks.
         self._last_item_close_at: float = 0.0
+        # Per-overlay last-fire timestamp + edge-trigger latch so we
+        # send ESC once per popup appearance, not every frame the
+        # template still matches (the popup takes ~half a second to
+        # animate out). Cleared the moment the template goes undetected.
+        self._last_overlay_close_at: dict[str, float] = {}
+        self._overlay_handled: set[str] = set()
 
     # ───────── lifecycle ─────────
     def start(self) -> None:
@@ -289,10 +295,58 @@ class MacroController:
         # and the list of slots that just fired this tick.
         self._maybe_trigger_recovery(analysis, fired_ids)
 
+        # Overlay popup auto-close (pet whistle paw / item acquired
+        # chest / …). Fires ESC once per popup appearance with a
+        # per-overlay cooldown so we don't spam keys.
+        self._maybe_close_overlays(analysis)
+
         # Auto-click the "item acquired" popup dismiss point. Runs
         # only while master is on (we're already past the early-out)
         # and respects the user's interval.
         self._maybe_item_close_click()
+
+    def _maybe_close_overlays(self, analysis: FrameAnalysis) -> None:
+        """Send ESC (or configured key) when any overlay is detected.
+
+        Edge-triggered per overlay: once a popup is detected we fire the
+        close key, latch ``_overlay_handled`` so we don't repeat-fire
+        every frame the template still matches, and clear the latch the
+        moment the template stops matching (popup dismissed). A
+        per-overlay cooldown is a secondary safeguard for popups that
+        re-appear quickly.
+        """
+        cfg = getattr(self.settings, "overlay_closes", None) or {}
+        matches = getattr(analysis, "overlay_matches", None) or {}
+        if not cfg or not matches:
+            return
+        now = time.monotonic()
+        for ov_id, ov in cfg.items():
+            if not getattr(ov, "enabled", False):
+                continue
+            m = matches.get(ov_id)
+            if m is None:
+                continue
+            if not m.detected:
+                # Popup gone — release the latch so the next appearance fires.
+                self._overlay_handled.discard(ov_id)
+                continue
+            if ov_id in self._overlay_handled:
+                continue
+            cooldown = max(0.1, float(ov.cooldown_seconds))
+            last = self._last_overlay_close_at.get(ov_id, 0.0)
+            if (now - last) < cooldown:
+                continue
+            self._last_overlay_close_at[ov_id] = now
+            self._overlay_handled.add(ov_id)
+            key = (ov.close_key or "esc").strip().lower() or "esc"
+            logger.info(
+                f"🚪 오버레이 감지 → {ov_id} 닫기 ('{key}' 발사)  "
+                f"score={int(m.score):,}"
+            )
+            try:
+                self.input.send_key(key)
+            except Exception:
+                logger.exception(f"overlay-close[{ov_id}]: send_key failed")
 
     def _maybe_item_close_click(self) -> None:
         ic = getattr(self.settings, "item_close", None)
