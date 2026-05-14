@@ -190,6 +190,9 @@ class OverlayClose(BaseModel):
     threshold: int = 3_000_000   # legacy magnitude, scale_legacy=5_000_000 (~0.6 NORMED)
     close_key: str = "esc"
     cooldown_seconds: float = 2.0
+    # 템플릿 매칭이 이 시간(초) 이상 연속으로 detected=True 여야 close_key
+    # 를 보냅니다. 짧은 색상 유사 오탐을 차단하기 위해 추가. 0이면 즉시.
+    sustain_seconds: float = 3.0
 
 
 class Alarm(BaseModel):

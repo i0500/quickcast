@@ -60,9 +60,9 @@ def build_steps() -> list[TutorialStep]:
                 "<b>+ 슬롯 추가</b>로 사용할 스킬을 등록합니다.<br>"
                 "각 슬롯에 다음을 설정:<br>"
                 "&nbsp;·&nbsp; <b>입력 키</b>: 게임에서 그 스킬을 발동하는 키<br>"
-                "&nbsp;·&nbsp; <b>HP / MP 범위</b>: 이 범위 안일 때만 발사<br>"
+                "&nbsp;·&nbsp; <b>HP / MP 범위</b>: 이 범위 안일 때만 사용<br>"
                 "&nbsp;·&nbsp; <b>연사 횟수 / 간격 / 쿨타임</b><br>"
-                "&nbsp;·&nbsp; <b>반복</b>: 끄면 1회만 발사 후 자동 OFF"
+                "&nbsp;·&nbsp; <b>반복</b>: 끄면 1회만 사용 후 자동 OFF"
             ),
             section_id="slots",
             target_finder=lambda a: _find(a, "_sections.slots.0"),
@@ -104,7 +104,7 @@ def build_steps() -> list[TutorialStep]:
                 "&nbsp;2. 사냥터 복귀 단계:<br>"
                 "&nbsp;&nbsp;&nbsp;① 주문서 키 입력 → "
                 "② 이동 → ③ 어시스트 키<br><br>"
-                "트리거: 물약 부족·PK·HP 0%·특정 슬롯 발사. "
+                "트리거: 물약 부족·PK·HP 0%·특정 슬롯 사용. "
                 "각 트리거 1회씩 발동 (조건 해제 후 재발동 가능)."
             ),
             section_id="combat",

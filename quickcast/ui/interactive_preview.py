@@ -133,13 +133,26 @@ class InteractivePreview(QWidget):
 
         # Native template sizes (W, H in frame coords). Read once from
         # the targets dir so the match overlay can draw a true-scale
-        # inner box at the matched position.
-        self._tmpl_size: dict[str, tuple[int, int]] = {
-            "pk": self._read_template_size("pk.png") or (25, 25),
-            "potion": self._read_template_size("potion.png") or (13, 13),
-        }
+        # inner box at the matched position. Keys:
+        #   "pk" / "potion"          → HUD icon templates
+        #   "overlay:{ov_id}"        → centred-popup templates
+        # Overlays whose template png is missing simply absent from the
+        # dict; Pass 1.5 then skips drawing the inner box for them.
+        self._tmpl_size: dict[str, tuple[int, int]] = {}
+        for fname, key in (
+            ("pk.png", "pk"),
+            ("potion.png", "potion"),
+        ):
+            sz = self._read_template_size(fname)
+            self._tmpl_size[key] = sz or (25 if key == "pk" else 13,) * 2
+        for roi_id, _label, _color in OVERLAY_ROI_DEFS:
+            ov_id = roi_id.split(":", 1)[1]
+            sz = self._read_template_size(f"{ov_id}.png")
+            if sz is not None:
+                self._tmpl_size[roi_id] = sz
         # Latest match locations + scales from the recognizer. (-1, -1)
-        # means no scan / slot OFF — overlay skipped.
+        # means no scan / slot OFF — overlay skipped. Same key namespace
+        # as ``_tmpl_size``.
         self._match_xy: dict[str, tuple[int, int]] = {
             "pk": (-1, -1), "potion": (-1, -1),
         }
@@ -264,7 +277,8 @@ class InteractivePreview(QWidget):
                             pk_match_xy: tuple[int, int] = (-1, -1),
                             potion_match_xy: tuple[int, int] = (-1, -1),
                             pk_match_scale: float = 1.0,
-                            potion_match_scale: float = 1.0) -> None:
+                            potion_match_scale: float = 1.0,
+                            overlay_matches: dict | None = None) -> None:
         """Latest recognition values to overlay near each ROI — short labels only.
 
         Label keys follow the *active* ROI set: in OCR mode the HP / MP /
@@ -282,6 +296,16 @@ class InteractivePreview(QWidget):
         self._match_xy["potion"] = potion_match_xy
         self._match_scale["pk"] = float(pk_match_scale)
         self._match_scale["potion"] = float(potion_match_scale)
+        # Per-overlay match data — keyed by overlay id (without the
+        # "overlay:" prefix in the analysis dict, but stored here under
+        # the prefixed key so all consumers share one namespace).
+        if overlay_matches:
+            for ov_id, om in overlay_matches.items():
+                key = f"overlay:{ov_id}"
+                mxy = getattr(om, "match_xy", (-1, -1))
+                msc = getattr(om, "match_scale", 1.0)
+                self._match_xy[key] = mxy
+                self._match_scale[key] = float(msc)
         pk_match = pk_score >= pk_thr
         potion_match = potion_score >= potion_thr
         if getattr(self.settings, "ocr_mode", False):
@@ -675,12 +699,23 @@ class InteractivePreview(QWidget):
                 for mx, my in mids:
                     p.drawPoint(mx, my)
 
-        # Pass 1.5: match-position overlay for PK / potion search boxes.
-        # Inside each enlarged search ROI we draw a thin white rectangle
-        # at the matcher's best-hit location, true template scale. Lets
-        # the user visually verify that template-matching locked onto
-        # the actual icon (not a stray HUD element).
-        for roi_id in ("pk", "potion"):
+        # Pass 1.5: match-position overlay for any ROI that holds a
+        # template-search result (PK / potion HUD icons + each enabled
+        # overlay-close popup). Inside each enlarged search ROI we draw
+        # a thin white rectangle at the matcher's best-hit location, in
+        # true template scale. Lets the user visually verify that
+        # template-matching locked onto the actual icon and not a
+        # stray HUD element.
+        #
+        # Overlay ids whose template png isn't loaded yet (e.g.
+        # item_acquired before the user supplies the chest icon) have
+        # no entry in ``_tmpl_size`` and are silently skipped — outer
+        # ROI box still draws so the search region remains adjustable.
+        match_box_ids = ["pk", "potion"]
+        for roi_id, _label, _color in OVERLAY_ROI_DEFS:
+            if roi_id in rect_widget:
+                match_box_ids.append(roi_id)
+        for roi_id in match_box_ids:
             if roi_id not in rect_widget:
                 continue
             mxy = self._match_xy.get(roi_id, (-1, -1))

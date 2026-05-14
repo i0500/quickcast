@@ -138,6 +138,7 @@ class _LivePreviewWrap(QWidget):
             potion_match_xy=analysis.potion_match_xy,
             pk_match_scale=analysis.pk_match_scale,
             potion_match_scale=analysis.potion_match_scale,
+            overlay_matches=getattr(analysis, "overlay_matches", None),
         )
         self.recognition.emit(
             int(analysis.hp), int(analysis.mp),
@@ -172,6 +173,7 @@ class _LivePreviewWrap(QWidget):
             potion_match_xy=analysis.potion_match_xy,
             pk_match_scale=analysis.pk_match_scale,
             potion_match_scale=analysis.potion_match_scale,
+            overlay_matches=getattr(analysis, "overlay_matches", None),
         )
         self.recognition.emit(
             analysis.hp, analysis.mp,
@@ -567,7 +569,7 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
                               tooltip="ROI 잠금 — 켜면 사각형 드래그/리사이즈 비활성화")
     lock_btn.setCheckable(True)
     pause_btn = IconOnlyButton("pause", size="md",
-                                tooltip="일시정지 — 매크로 발사 중단 (마스터 OFF 동등)")
+                                tooltip="일시정지 — 매크로 사용 중단 (마스터 OFF 동등)")
     pause_btn.setCheckable(True)
     fs_btn = IconOnlyButton("maximize-2", size="md", tooltip="전체화면 (F11)")
     header.addWidget(lock_btn); header.addWidget(pause_btn); header.addWidget(fs_btn)

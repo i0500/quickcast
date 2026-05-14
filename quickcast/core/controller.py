@@ -69,6 +69,9 @@ class MacroController:
         # animate out). Cleared the moment the template goes undetected.
         self._last_overlay_close_at: dict[str, float] = {}
         self._overlay_handled: set[str] = set()
+        # 오버레이가 처음 감지된 시각 — sustain_seconds 동안 연속 유지될
+        # 때만 close_key를 보낸다. detected=False가 되면 즉시 클리어.
+        self._overlay_first_seen_at: dict[str, float] = {}
 
     # ───────── lifecycle ─────────
     def start(self) -> None:
@@ -329,8 +332,18 @@ class MacroController:
             if not m.detected:
                 # Popup gone — release the latch so the next appearance fires.
                 self._overlay_handled.discard(ov_id)
+                self._overlay_first_seen_at.pop(ov_id, None)
                 continue
             if ov_id in self._overlay_handled:
+                continue
+            # 3초 유지(또는 ov.sustain_seconds) — 첫 감지 시각을 기록하고
+            # 연속으로 sustain_seconds 동안 detected 가 유지될 때만 통과.
+            sustain = max(0.0, float(getattr(ov, "sustain_seconds", 0.0) or 0.0))
+            first_seen = self._overlay_first_seen_at.get(ov_id)
+            if first_seen is None:
+                self._overlay_first_seen_at[ov_id] = now
+                first_seen = now
+            if sustain > 0.0 and (now - first_seen) < sustain:
                 continue
             cooldown = max(0.1, float(ov.cooldown_seconds))
             last = self._last_overlay_close_at.get(ov_id, 0.0)
@@ -339,8 +352,9 @@ class MacroController:
             self._last_overlay_close_at[ov_id] = now
             self._overlay_handled.add(ov_id)
             key = (ov.close_key or "esc").strip().lower() or "esc"
+            held = now - first_seen
             logger.info(
-                f"🚪 오버레이 감지 → {ov_id} 닫기 ('{key}' 발사)  "
+                f"🚪 오버레이 감지 {held:.1f}s 유지 → {ov_id} 닫기 ('{key}' 사용)  "
                 f"score={int(m.score):,}"
             )
             try:
@@ -565,7 +579,7 @@ class MacroController:
                 backend_name = type(backend).__name__
             else:
                 logger.warning(
-                    f"⚠️ {event.label} 발사 실패: 사용 가능한 백엔드 없음"
+                    f"⚠️ {event.label} 사용 실패: 사용 가능한 백엔드 없음"
                 )
 
         # Hardware first; notification is best-effort and async

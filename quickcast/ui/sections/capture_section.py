@@ -634,8 +634,8 @@ def _build_overlay_close_card() -> "QWidget":
     card = Card(
         "오버레이 자동 닫기",
         subtitle=(
-            "중앙 팝업(펫 호루라기 발바닥, 아이템 획득 상자 등)이 뜨면 "
-            "ESC로 자동 닫아서 슬롯 스킬이 다시 동작하도록 합니다."
+            "펫 호루라기 발바닥이 3초 이상 지속되면 ESC로 자동 닫아서 "
+            "슬롯 스킬이 다시 동작하도록 합니다."
         ),
         inline_subtitle=False,
     )
@@ -796,7 +796,9 @@ def _build_overlay_close_card() -> "QWidget":
 
         return wrap
 
-    for ov_id in ("pet_whistle", "item_acquired"):
+    # 아이템 획득은 펫 호루라기 ESC와 함께 닫히는 경우가 많아
+    # UI에서는 숨김 (overlay_closes 설정 자체는 유지). 필요 시 다시 노출.
+    for ov_id in ("pet_whistle",):
         card.add(_make_row(ov_id))
 
     # Wire live overlay scores from the analysis stream into the score

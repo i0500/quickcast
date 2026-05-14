@@ -686,7 +686,7 @@ class AppWindow(AppShell):
         try:
             self.controller.input.send_key(key)
             NotificationCenter.toast(
-                f"🚪 {ov_id} 테스트 — '{key}' 발사",
+                f"🚪 {ov_id} 테스트 — '{key}' 사용",
                 level="success", duration_ms=2000,
             )
         except Exception:
@@ -709,7 +709,7 @@ class AppWindow(AppShell):
         try:
             fn()
             NotificationCenter.toast(
-                "🖱️ 아이템닫기 테스트 클릭 발사 — 게임에서 확인하세요",
+                "🖱️ 아이템닫기 테스트 클릭 전송 — 게임에서 확인하세요",
                 level="success", duration_ms=2000,
             )
         except Exception:
