@@ -213,6 +213,11 @@ _RECENT_EVENTS: list[tuple[str, str]] = []
 
 from quickcast.ui.sections._mock_state import slot_state, alarm_state
 
+# 리니지 퍼플 톤 — 쿨다운 카운터 텍스트 / 행 하단 게이지 / ↺ 리셋 버튼.
+# 팔레트 state_warning(주황)을 쓰면 PK 위험 알림과 시각 충돌하므로 별도 컬러.
+_LP_PURPLE = "#8B5CF6"
+_LP_PURPLE_HOVER = "#A78BFA"
+
 
 class _SkillToggleChip(QWidget):
     """Compact slot toggle synced with the global slot_state."""
@@ -310,7 +315,7 @@ class _SidebarSkillRow(QWidget):
         # cooling. QStackedWidget keeps the row width perfectly stable.
         self.kbd = QLabel(slot_state.key(slot_id))
         self.kbd.setAlignment(Qt.AlignCenter)
-        self.x_btn = QPushButton("✕")
+        self.x_btn = QPushButton("↺")
         self.x_btn.setCursor(Qt.PointingHandCursor)
         self.x_btn.setToolTip("쿨타임 즉시 해제")
         self.x_btn.clicked.connect(self._on_reset_click)
@@ -330,9 +335,10 @@ class _SidebarSkillRow(QWidget):
         p = T.palette
         on = slot_state.is_on(self.slot_id)
         cooling = self._cd_ratio > 0.0
-        # While cooling, the id slot doubles as the countdown — make
-        # it stand out with the warning accent + bold weight.
-        id_color = p.state_warning if cooling else p.text_tertiary
+        # While cooling, the id slot doubles as the countdown — uses
+        # Lineage Purple so it's visually distinct from PK 위험(주황) /
+        # 알림 정지(붉은) accents elsewhere.
+        id_color = _LP_PURPLE if cooling else p.text_tertiary
         id_weight = 600 if cooling else 400
         self.id_lbl.setStyleSheet(
             f"color:{id_color}; font-family:{T.type.mono};"
@@ -349,10 +355,10 @@ class _SidebarSkillRow(QWidget):
             f" font-family:{T.type.mono}; font-size:11px;"
         )
         self.x_btn.setStyleSheet(
-            f"QPushButton {{ background:transparent; color:{p.state_warning};"
-            f" border:1px solid {p.state_warning}; border-radius:10px;"
-            f" font-size:11px; font-weight:700; padding:0; }}"
-            f"QPushButton:hover {{ background:{p.state_warning}; color:white; }}"
+            f"QPushButton {{ background:transparent; color:{_LP_PURPLE};"
+            f" border:none; padding:0;"
+            f" font-size:15px; font-weight:700; }}"
+            f"QPushButton:hover {{ color:{_LP_PURPLE_HOVER}; }}"
         )
 
     @staticmethod
@@ -400,18 +406,21 @@ class _SidebarSkillRow(QWidget):
         super().paintEvent(e)
         if self._cd_ratio <= 0.0:
             return
-        try:
-            color = QColor(T.palette.state_warning)
-        except Exception:
-            color = QColor("#f59f00")
-        # Subtle 2px flowing bar along the very bottom of the row —
-        # shrinks left→right as the cooldown drains.
+        color = QColor(_LP_PURPLE)
+        # Bar lives strictly between the left toggle and the right
+        # stack (kbd/↺) — running edge-to-edge looked off against
+        # the row's existing inner padding.
+        left = self.sw.geometry().right() + 1
+        right = self.right_stack.geometry().left() - 1
+        available = max(0, right - left)
+        if available <= 0:
+            return
         bar_h = 2
-        bar_w = int(self.width() * self._cd_ratio)
+        bar_w = int(available * self._cd_ratio)
         if bar_w <= 0:
             return
         p = QPainter(self)
-        p.fillRect(0, self.height() - bar_h, bar_w, bar_h, color)
+        p.fillRect(left, self.height() - bar_h, bar_w, bar_h, color)
         p.end()
 
     def _on_local(self, on: bool) -> None:
