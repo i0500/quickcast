@@ -145,6 +145,15 @@ class AppWindow(AppShell):
         self._poll_timer.timeout.connect(self._poll_save)
         self._poll_timer.start()
 
+        # Slot cooldown broadcaster — polls the controller's per-slot
+        # cooldown registry ~5x/s and emits remaining seconds on the
+        # bus so the dashboard sidebar's skill rows can render a live
+        # countdown next to each `#id` label.
+        self._cd_timer = QTimer(self)
+        self._cd_timer.setInterval(200)
+        self._cd_timer.timeout.connect(self._broadcast_slot_cooldowns)
+        self._cd_timer.start()
+
         # Auto window-detection (every 5s while no game window is bound).
         # The user can launch the game AFTER QuickCast and have it picked
         # up automatically — same path as the manual Capture-section pick.
@@ -202,6 +211,13 @@ class AppWindow(AppShell):
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self._open_palette)
         # Tutorial (re-launchable via Help menu / shortcut).
         QShortcut(QKeySequence("Ctrl+Shift+T"), self, activated=self.start_tutorial)
+        # 섹션 전환 단축키 Ctrl+1 ~ Ctrl+6 — 캡처 도구·키보드 사용자 편의.
+        # ApplicationShortcut context — 윈도우가 inactive 상태에서도 동작.
+        from PySide6.QtCore import Qt as _Qt
+        for _idx, (_sid, _icon, _name) in enumerate(SECTIONS):
+            _sc = QShortcut(QKeySequence(f"Ctrl+{_idx+1}"), self,
+                             activated=lambda __sid=_sid: self._activate_section_by_id(__sid))
+            _sc.setContext(_Qt.ApplicationShortcut)
 
         # Tray (hide-on-close, balloon for alarms)
         self._build_tray()
@@ -733,6 +749,33 @@ class AppWindow(AppShell):
                 )
             except Exception:
                 logger.exception("recognizer.reload_digits failed")
+
+    # ───────── slot cooldown broadcaster ─────────
+    def _broadcast_slot_cooldowns(self) -> None:
+        """Poll controller.slot_manager.cooldown for each known slot id
+        and emit `{sid: (remaining, total)}` on the bus. The dashboard
+        sidebar's skill rows listen and update their countdown labels
+        and the bottom-edge progress gauge.
+        """
+        if self.controller is None:
+            return
+        sm = getattr(self.controller, "slot_manager", None)
+        cd = getattr(sm, "cooldown", None) if sm is not None else None
+        if cd is None:
+            return
+        try:
+            slots = self.settings.slots
+        except Exception:
+            return
+        payload: dict = {}
+        for sid, slot in slots.items():
+            try:
+                rem = float(cd.remaining(sid))
+                total = float(getattr(slot, "cooltime", 0.0) or 0.0)
+            except Exception:
+                rem, total = 0.0, 0.0
+            payload[sid] = (rem, total)
+        bus.slot_cooldown_tick.emit(payload)
 
     # ───────── auto game-window detection ─────────
     def _auto_find_game_window(self) -> None:

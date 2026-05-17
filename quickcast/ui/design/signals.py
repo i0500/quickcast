@@ -107,6 +107,11 @@ class _SignalBus(QObject):
     # routes a single close_key press through the active input backend
     # so the user can verify the wire without a real popup.
     overlay_close_test = Signal(str, str)     # (ov_id, close_key)
+    # Per-slot cooldown state. AppWindow polls controller.slot_manager
+    # .cooldown ~5x/s and emits {slot_id: (remaining_seconds, total_seconds)}
+    # so the dashboard sidebar's skill rows can render both a numeric
+    # countdown and a progress gauge along the row's bottom edge.
+    slot_cooldown_tick = Signal(dict)         # {slot_id: (remaining, total)}
 
 
 bus = _SignalBus()

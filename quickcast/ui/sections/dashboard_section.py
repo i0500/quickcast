@@ -284,18 +284,24 @@ class _AlarmToggleChip(QWidget):
 
 
 class _SidebarSkillRow(QWidget):
-    """Sidebar row: [toggle] [#id] [name] [key]  — synced with slot_state."""
+    """Sidebar row: [toggle] [#id/cd] [name] [key] + bottom cooldown gauge."""
     def __init__(self, slot_id: str) -> None:
         super().__init__()
         self.slot_id = slot_id
+        # 0.0 = ready, 1.0 = just triggered. Drives both the id-label
+        # text swap (#id ↔ countdown) and the bottom-edge progress bar.
+        self._cd_ratio = 0.0
         self.setMinimumHeight(32)
         h = QHBoxLayout(self); h.setContentsMargins(8, 4, 10, 4); h.setSpacing(8)
         self.sw = IOSToggle(width=32, height=18)
         self.sw.set_state(slot_state.is_on(slot_id), animate=False)
         self.sw.toggled.connect(self._on_local)
         h.addWidget(self.sw)
+        # #id when ready, becomes a cooldown counter (e.g. "5.3s",
+        # "12m30s", "2h46m") while the slot is cooling down. Fixed
+        # width keeps the row from dancing as the text length changes.
         self.id_lbl = QLabel(f"#{slot_id}")
-        self.id_lbl.setMinimumWidth(20)
+        self.id_lbl.setFixedWidth(40)
         h.addWidget(self.id_lbl)
         self.name_lbl = QLabel(slot_state.label(slot_id))
         h.addWidget(self.name_lbl, stretch=1)
@@ -304,13 +310,20 @@ class _SidebarSkillRow(QWidget):
         from quickcast.ui.design.signals import bus
         bus.theme_changed.connect(self._restyle)
         slot_state.slot_toggled.connect(self._on_global)
+        bus.slot_cooldown_tick.connect(self._on_cooldown_tick)
         self._restyle()
 
     def _restyle(self) -> None:
         p = T.palette
         on = slot_state.is_on(self.slot_id)
+        cooling = self._cd_ratio > 0.0
+        # While cooling, the id slot doubles as the countdown — make
+        # it stand out with the warning accent + bold weight.
+        id_color = p.state_warning if cooling else p.text_tertiary
+        id_weight = 600 if cooling else 400
         self.id_lbl.setStyleSheet(
-            f"color:{p.text_tertiary}; font-family:{T.type.mono}; font-size:12px;"
+            f"color:{id_color}; font-family:{T.type.mono};"
+            f" font-size:12px; font-weight:{id_weight};"
         )
         self.name_lbl.setStyleSheet(
             f"color:{p.text_primary if on else p.text_tertiary};"
@@ -322,6 +335,67 @@ class _SidebarSkillRow(QWidget):
             f" border-radius:4px; padding:2px 7px;"
             f" font-family:{T.type.mono}; font-size:11px;"
         )
+
+    @staticmethod
+    def _fmt_cd(rem: float) -> str:
+        """5.3s / 12m30s / 2h46m  — keeps under 6 chars for any duration."""
+        if rem >= 3600.0:
+            hh = int(rem // 3600)
+            mm = int((rem % 3600) // 60)
+            return f"{hh}h{mm:02d}m"
+        if rem >= 60.0:
+            mm = int(rem // 60)
+            ss = int(rem % 60)
+            return f"{mm}m{ss:02d}s"
+        return f"{rem:.1f}s"
+
+    def _on_cooldown_tick(self, payload: dict) -> None:
+        data = payload.get(self.slot_id)
+        # Back-compat: accept either (rem, total) tuple or bare seconds.
+        if isinstance(data, (tuple, list)):
+            rem = float(data[0] or 0.0)
+            total = float(data[1] or 0.0) if len(data) > 1 else 0.0
+        else:
+            rem = float(data or 0.0)
+            total = 0.0
+        # 0.05s 미만은 "준비됨"으로 간주 — 깜빡임 방지.
+        cooling = rem > 0.05
+        new_text = self._fmt_cd(rem) if cooling else f"#{self.slot_id}"
+        new_ratio = (rem / total) if (cooling and total > 0.0) else 0.0
+        new_ratio = max(0.0, min(1.0, new_ratio))
+        was_cooling = self._cd_ratio > 0.0
+        if self.id_lbl.text() != new_text:
+            self.id_lbl.setText(new_text)
+        if abs(new_ratio - self._cd_ratio) > 0.005 or (cooling != was_cooling):
+            self._cd_ratio = new_ratio
+            self.update()       # repaint bottom gauge
+        if cooling != was_cooling:
+            self._restyle()     # swap id-label color/weight
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        if self._cd_ratio <= 0.0:
+            return
+        try:
+            color = QColor(T.palette.state_warning)
+        except Exception:
+            color = QColor("#f59f00")
+        # Subtle 2px flowing bar along the very bottom of the row —
+        # shrinks left→right as the cooldown drains.
+        bar_h = 2
+        bar_w = int(self.width() * self._cd_ratio)
+        if bar_w <= 0:
+            return
+        p = QPainter(self)
+        p.fillRect(0, self.height() - bar_h, bar_w, bar_h, color)
+        p.end()
+
+    def _on_cooldown_tick(self, remaining: dict) -> None:
+        rem = float(remaining.get(self.slot_id, 0.0) or 0.0)
+        # 0.05s 미만은 "준비됨"으로 간주 — 1자리 소수 출력의 깜빡임 방지.
+        new_text = f"{rem:.1f}s" if rem > 0.05 else ""
+        if self.cd_lbl.text() != new_text:
+            self.cd_lbl.setText(new_text)
 
     def _on_local(self, on: bool) -> None:
         slot_state.set_on(self.slot_id, on)
