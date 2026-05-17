@@ -146,13 +146,18 @@ class AppWindow(AppShell):
         self._poll_timer.start()
 
         # Slot cooldown broadcaster — polls the controller's per-slot
-        # cooldown registry ~5x/s and emits remaining seconds on the
-        # bus so the dashboard sidebar's skill rows can render a live
-        # countdown next to each `#id` label.
+        # cooldown registry every 100 ms and emits remaining seconds on
+        # the bus so the dashboard sidebar's skill rows can render a
+        # live countdown + progress gauge.
         self._cd_timer = QTimer(self)
-        self._cd_timer.setInterval(200)
+        self._cd_timer.setInterval(100)
         self._cd_timer.timeout.connect(self._broadcast_slot_cooldowns)
         self._cd_timer.start()
+        # Track which slot ids we've already logged a "started" line for
+        # in this cooldown cycle, so logs stay readable.
+        self._cd_logged: set[str] = set()
+        # User-driven manual reset from the per-row ✕ button.
+        bus.slot_cooldown_reset_request.connect(self._reset_slot_cooldown)
 
         # Auto window-detection (every 5s while no game window is bound).
         # The user can launch the game AFTER QuickCast and have it picked
@@ -775,7 +780,42 @@ class AppWindow(AppShell):
             except Exception:
                 rem, total = 0.0, 0.0
             payload[sid] = (rem, total)
+        # Diagnostic — log once per cooldown cycle when a slot transitions
+        # ready → cooling. Cleared when the slot becomes ready again so
+        # repeated fires log fresh. Goes through loguru → dashboard log card.
+        cooling_now: set[str] = set()
+        for sid, (rem, total) in payload.items():
+            if rem > 0.05:
+                cooling_now.add(sid)
+                if sid not in self._cd_logged:
+                    self._cd_logged.add(sid)
+                    logger.info(f"⏱️ 슬롯 '{sid}' 쿨다운 시작 {rem:.1f}/{total:.1f}s")
+        # Clear log latch for slots that finished cooling.
+        for sid in list(self._cd_logged):
+            if sid not in cooling_now:
+                self._cd_logged.discard(sid)
         bus.slot_cooldown_tick.emit(payload)
+
+    def _reset_slot_cooldown(self, slot_id: str) -> None:
+        """Manual cooldown reset from a sidebar row's ✕ button — clears
+        the cooldown so the slot can re-fire on the next eligible tick.
+        """
+        if self.controller is None:
+            return
+        sm = getattr(self.controller, "slot_manager", None)
+        cd = getattr(sm, "cooldown", None) if sm is not None else None
+        if cd is None:
+            return
+        try:
+            cd.reset(slot_id)
+        except Exception:
+            logger.exception(f"cooldown reset failed for slot '{slot_id}'")
+            return
+        self._cd_logged.discard(slot_id)
+        logger.info(f"🧹 슬롯 '{slot_id}' 쿨다운 수동 해제")
+        # Push an immediate broadcast so the row clears without waiting
+        # for the next 100ms poll cycle.
+        self._broadcast_slot_cooldowns()
 
     # ───────── auto game-window detection ─────────
     def _auto_find_game_window(self) -> None:

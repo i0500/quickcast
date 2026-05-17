@@ -284,12 +284,13 @@ class _AlarmToggleChip(QWidget):
 
 
 class _SidebarSkillRow(QWidget):
-    """Sidebar row: [toggle] [#id/cd] [name] [key] + bottom cooldown gauge."""
+    """Sidebar row: [toggle] [#id/cd] [name] [kbd or ✕] + bottom cooldown gauge."""
     def __init__(self, slot_id: str) -> None:
         super().__init__()
+        from PySide6.QtWidgets import QPushButton, QStackedWidget
         self.slot_id = slot_id
-        # 0.0 = ready, 1.0 = just triggered. Drives both the id-label
-        # text swap (#id ↔ countdown) and the bottom-edge progress bar.
+        # 0.0 = ready, 1.0 = just triggered. Drives the id-label text swap
+        # (#id ↔ countdown), the bottom progress bar, and the kbd ↔ ✕ swap.
         self._cd_ratio = 0.0
         self.setMinimumHeight(32)
         h = QHBoxLayout(self); h.setContentsMargins(8, 4, 10, 4); h.setSpacing(8)
@@ -305,8 +306,20 @@ class _SidebarSkillRow(QWidget):
         h.addWidget(self.id_lbl)
         self.name_lbl = QLabel(slot_state.label(slot_id))
         h.addWidget(self.name_lbl, stretch=1)
+        # Right-edge slot: keyboard label normally, ✕ reset button while
+        # cooling. QStackedWidget keeps the row width perfectly stable.
         self.kbd = QLabel(slot_state.key(slot_id))
-        h.addWidget(self.kbd)
+        self.kbd.setAlignment(Qt.AlignCenter)
+        self.x_btn = QPushButton("✕")
+        self.x_btn.setCursor(Qt.PointingHandCursor)
+        self.x_btn.setToolTip("쿨타임 즉시 해제")
+        self.x_btn.clicked.connect(self._on_reset_click)
+        self.right_stack = QStackedWidget()
+        self.right_stack.setFixedSize(36, 22)
+        self.right_stack.addWidget(self.kbd)      # index 0 — ready state
+        self.right_stack.addWidget(self.x_btn)    # index 1 — cooling state
+        self.right_stack.setCurrentIndex(0)
+        h.addWidget(self.right_stack)
         from quickcast.ui.design.signals import bus
         bus.theme_changed.connect(self._restyle)
         slot_state.slot_toggled.connect(self._on_global)
@@ -334,6 +347,12 @@ class _SidebarSkillRow(QWidget):
             f" border:1px solid {p.border_default};"
             f" border-radius:4px; padding:2px 7px;"
             f" font-family:{T.type.mono}; font-size:11px;"
+        )
+        self.x_btn.setStyleSheet(
+            f"QPushButton {{ background:transparent; color:{p.state_warning};"
+            f" border:1px solid {p.state_warning}; border-radius:10px;"
+            f" font-size:11px; font-weight:700; padding:0; }}"
+            f"QPushButton:hover {{ background:{p.state_warning}; color:white; }}"
         )
 
     @staticmethod
@@ -370,7 +389,12 @@ class _SidebarSkillRow(QWidget):
             self._cd_ratio = new_ratio
             self.update()       # repaint bottom gauge
         if cooling != was_cooling:
+            self.right_stack.setCurrentIndex(1 if cooling else 0)
             self._restyle()     # swap id-label color/weight
+
+    def _on_reset_click(self) -> None:
+        from quickcast.ui.design.signals import bus
+        bus.slot_cooldown_reset_request.emit(self.slot_id)
 
     def paintEvent(self, e) -> None:
         super().paintEvent(e)
@@ -389,13 +413,6 @@ class _SidebarSkillRow(QWidget):
         p = QPainter(self)
         p.fillRect(0, self.height() - bar_h, bar_w, bar_h, color)
         p.end()
-
-    def _on_cooldown_tick(self, remaining: dict) -> None:
-        rem = float(remaining.get(self.slot_id, 0.0) or 0.0)
-        # 0.05s 미만은 "준비됨"으로 간주 — 1자리 소수 출력의 깜빡임 방지.
-        new_text = f"{rem:.1f}s" if rem > 0.05 else ""
-        if self.cd_lbl.text() != new_text:
-            self.cd_lbl.setText(new_text)
 
     def _on_local(self, on: bool) -> None:
         slot_state.set_on(self.slot_id, on)
