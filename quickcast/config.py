@@ -184,10 +184,12 @@ class OverlayClose(BaseModel):
     the same default since its chest icon sits in the same area.
     """
     enabled: bool = False
-    cap: Point = Field(default_factory=lambda: Point(x=591, y=100))
-    cap_w: int = 114
-    cap_h: int = 93
-    threshold: int = 3_000_000   # legacy magnitude, scale_legacy=5_000_000 (~0.6 NORMED)
+    # 사용자 export 기준 캘리브레이션 값 — 펫호루라기 발바닥에
+    # 딱 들어가는 ROI. 아이템 획득도 같은 중앙 팝업 위치라 동일 기본값 공유.
+    cap: Point = Field(default_factory=lambda: Point(x=595, y=93))
+    cap_w: int = 85
+    cap_h: int = 78
+    threshold: int = 3_100_000   # legacy magnitude, scale_legacy=5_000_000 (~0.6 NORMED)
     close_key: str = "esc"
     cooldown_seconds: float = 2.0
     # 템플릿 매칭이 이 시간(초) 이상 연속으로 detected=True 여야 close_key
