@@ -374,8 +374,16 @@ class Settings(BaseModel):
     # changes required.
     overlay_closes: dict[str, OverlayClose] = Field(
         default_factory=lambda: {
+            # pet_whistle: 사용자 캘리브레이션 — OverlayClose() 클래스 기본값과 동일.
             "pet_whistle": OverlayClose(),
-            "item_acquired": OverlayClose(),
+            # item_acquired: 보상 상자 위치/크기/임계값이 펫호루라기와 미세하게
+            # 달라 별도 캘리브레이션 적용.
+            "item_acquired": OverlayClose(
+                cap=Point(x=594, y=94),
+                cap_w=85,
+                cap_h=77,
+                threshold=3_500_000,
+            ),
         }
     )
     notify_on_alarm_toast: bool = True   # Windows tray toast on alarm
