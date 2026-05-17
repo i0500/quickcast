@@ -213,11 +213,6 @@ _RECENT_EVENTS: list[tuple[str, str]] = []
 
 from quickcast.ui.sections._mock_state import slot_state, alarm_state
 
-# 리니지 퍼플 톤 — 쿨다운 카운터 텍스트 / 행 하단 게이지 / ↺ 리셋 버튼.
-# 팔레트 state_warning(주황)을 쓰면 PK 위험 알림과 시각 충돌하므로 별도 컬러.
-_LP_PURPLE = "#8B5CF6"
-_LP_PURPLE_HOVER = "#A78BFA"
-
 
 class _SkillToggleChip(QWidget):
     """Compact slot toggle synced with the global slot_state."""
@@ -336,9 +331,9 @@ class _SidebarSkillRow(QWidget):
         on = slot_state.is_on(self.slot_id)
         cooling = self._cd_ratio > 0.0
         # While cooling, the id slot doubles as the countdown — uses
-        # Lineage Purple so it's visually distinct from PK 위험(주황) /
-        # 알림 정지(붉은) accents elsewhere.
-        id_color = _LP_PURPLE if cooling else p.text_tertiary
+        # the warm gold accent (state_warning) so it pops without
+        # clashing with the rest of the row.
+        id_color = p.state_warning if cooling else p.text_tertiary
         id_weight = 600 if cooling else 400
         self.id_lbl.setStyleSheet(
             f"color:{id_color}; font-family:{T.type.mono};"
@@ -355,10 +350,10 @@ class _SidebarSkillRow(QWidget):
             f" font-family:{T.type.mono}; font-size:11px;"
         )
         self.x_btn.setStyleSheet(
-            f"QPushButton {{ background:transparent; color:{_LP_PURPLE};"
+            f"QPushButton {{ background:transparent; color:{p.state_warning};"
             f" border:none; padding:0;"
             f" font-size:15px; font-weight:700; }}"
-            f"QPushButton:hover {{ color:{_LP_PURPLE_HOVER}; }}"
+            f"QPushButton:hover {{ color:{p.state_danger}; }}"
         )
 
     @staticmethod
@@ -406,7 +401,10 @@ class _SidebarSkillRow(QWidget):
         super().paintEvent(e)
         if self._cd_ratio <= 0.0:
             return
-        color = QColor(_LP_PURPLE)
+        try:
+            color = QColor(T.palette.state_warning)
+        except Exception:
+            color = QColor("#F59E0B")
         # Bar lives strictly between the left toggle and the right
         # stack (kbd/↺) — running edge-to-edge looked off against
         # the row's existing inner padding.

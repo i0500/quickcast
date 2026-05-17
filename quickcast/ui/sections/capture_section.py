@@ -796,9 +796,9 @@ def _build_overlay_close_card() -> "QWidget":
 
         return wrap
 
-    # 아이템 획득은 펫 호루라기 ESC와 함께 닫히는 경우가 많아
-    # UI에서는 숨김 (overlay_closes 설정 자체는 유지). 필요 시 다시 노출.
-    for ov_id in ("pet_whistle",):
+    # 펫 호루라기 + 아이템 획득 둘 다 노출. 같은 ROI(중앙 팝업 영역)와
+    # 임계값 기본값을 공유하므로 UI 형태는 완전히 동일.
+    for ov_id in ("pet_whistle", "item_acquired"):
         card.add(_make_row(ov_id))
 
     # Wire live overlay scores from the analysis stream into the score
