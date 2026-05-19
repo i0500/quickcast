@@ -404,6 +404,10 @@ class Settings(BaseModel):
 
     # Misc
     capture_fps: int = 10           # 5..30 — UI ComboBox enforces the cap
+    # 인식 multi-scale 단계 수 — 1=고정 1.00× 만, 10=0.60×~1.60× 촘촘.
+    # 단계가 늘면 인식률↑ / CPU 부담↑. 같은 해상도/창모드에서 안정적으로
+    # 쓰는 사용자는 3, 게임 창 크기를 자주 바꾸는 사용자는 7~9 권장.
+    scale_steps: int = Field(3, ge=1, le=10)
     theme: str = "dark"           # see quickcast.ui.design.themes.THEMES
     game_window_patterns: list[str] = Field(
         default_factory=lambda: ["리니지W", "Lineage W", "LINEAGE", "퍼플", "PURPLE"]

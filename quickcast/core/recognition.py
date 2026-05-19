@@ -207,21 +207,36 @@ _TS_DIAG = {"last": 0.0}    # throttled raw-score logger
 _ROI_FIX_REPORTED: dict[str, bool] = {}    # log ROI auto-fix once per kind
 
 
-# Multi-scale candidates — 0.60×~1.60× 광범위 팬.
-# 사용자 보고: 게임 창을 작게 줄이면 인식 누락이 늘어남. letterbox 정규화는
-# 1280×720으로 통일하지만, 작은 게임 창은 픽셀 보간이 더 들어가 아이콘이
-# 정규화 프레임 안에서 ~8 픽셀로 축소되어 들어오는 케이스 발생. 좁은 ±18%
-# 팬으로는 잡지 못해 인식 누락. ±60% 까지 확장해 작은 화면/큰 화면 양쪽
-# 다 커버. 1.0× 부근은 촘촘하게, 양 끝은 듬성하게.
-# 13×13 템플릿 기준 9-scale matchTemplate 한 프레임 비용 ≈ 2ms (10 fps에서
-# CPU 사용 ~2%) — 무시 가능.
-_SCALE_CANDIDATES: tuple[float, ...] = (
-    0.60, 0.72, 0.85, 0.93, 1.00, 1.08, 1.18, 1.35, 1.60,
-)
+# Multi-scale candidates — settings.scale_steps(1..10)로 단계 수를 조절.
+# 단계가 늘어날수록 인식률은 올라가고 CPU 비용은 거의 선형으로 증가
+# (13×13 템플릿 기준 1단계 ≈ 0.3ms / 10단계 ≈ 2.5ms @ 한 프레임).
+# 기본 3단계는 1.0× 중심 ±8% 만 보므로 같은 해상도에서 안정적인 사용자에게
+# 가장 가벼움. 게임 창 크기를 자주 바꾸는 사용자는 7~9단계로 올리면 됨.
+# 각 프리셋은 1.0× 부근은 촘촘 / 양 끝은 듬성한 비대칭 분포.
+_SCALE_PRESETS: dict[int, tuple[float, ...]] = {
+    1:  (1.00,),
+    2:  (0.93, 1.08),
+    3:  (0.93, 1.00, 1.08),
+    4:  (0.85, 0.93, 1.08, 1.18),
+    5:  (0.85, 0.93, 1.00, 1.08, 1.18),
+    6:  (0.72, 0.85, 0.93, 1.08, 1.18, 1.35),
+    7:  (0.72, 0.85, 0.93, 1.00, 1.08, 1.18, 1.35),
+    8:  (0.60, 0.72, 0.85, 0.93, 1.08, 1.18, 1.35, 1.60),
+    9:  (0.60, 0.72, 0.85, 0.93, 1.00, 1.08, 1.18, 1.35, 1.60),
+    10: (0.60, 0.72, 0.80, 0.85, 0.93, 1.00, 1.08, 1.18, 1.35, 1.60),
+}
+_DEFAULT_SCALES: tuple[float, ...] = _SCALE_PRESETS[3]
+
+
+def _resolve_scales(steps: int) -> tuple[float, ...]:
+    """Map settings.scale_steps → preset tuple, clamped to [1, 10]."""
+    n = max(1, min(10, int(steps)))
+    return _SCALE_PRESETS[n]
 
 
 def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
                        *, scale_legacy: float = 1_000_000.0,
+                       scales: tuple[float, ...] = _DEFAULT_SCALES,
                        _kind: str = "") -> tuple[float, tuple[int, int], float]:
     """Find the best template match inside `roi_bgra`.
 
@@ -264,8 +279,8 @@ def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
     # ROI too small even for the smallest scale → cannot match. Reported
     # at DEBUG only (the recognizer enforces a minimum size before
     # calling us in the steady-state path).
-    smallest = max(1, int(round(tw_native * _SCALE_CANDIDATES[0])))
-    smallest_h = max(1, int(round(th_native * _SCALE_CANDIDATES[0])))
+    smallest = max(1, int(round(tw_native * scales[0])))
+    smallest_h = max(1, int(round(th_native * scales[0])))
     if rw < smallest or rh < smallest_h:
         logger.debug(
             f"_template_search[{_kind}]: ROI {rw}x{rh} < smallest "
@@ -307,7 +322,7 @@ def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
     best_score = -1.0
     best_xy = (-1, -1)
     best_scale = 1.0
-    for s in _SCALE_CANDIDATES:
+    for s in scales:
         sw = max(1, int(round(tw_native * s)))
         sh = max(1, int(round(th_native * s)))
         if sw > rw or sh > rh:
@@ -526,6 +541,7 @@ class Recognizer:
     def analyze(self, frame: Frame, settings: Settings) -> FrameAnalysis:
         sura_offset_hp = 5 if settings.sura_mode else 0
         sura_offset_mp = 6 if settings.sura_mode else 0
+        scales = _resolve_scales(settings.scale_steps)
 
         # PK / Potion: ROI is a *search region* — the user draws a box
         # at least as large as the template, and cv2.matchTemplate scans
@@ -683,7 +699,7 @@ class Recognizer:
             pk_roi = frame.crop(settings.pk.cap, settings.pk.cap_w, settings.pk.cap_h)
             pk_score, local_xy, pk_match_scale = _template_search(
                 pk_roi, self._pk_target,
-                scale_legacy=5_000_000.0, _kind="pk",
+                scale_legacy=5_000_000.0, scales=scales, _kind="pk",
             )
             if local_xy != (-1, -1):
                 pk_match_xy = (settings.pk.cap.x + local_xy[0],
@@ -697,7 +713,7 @@ class Recognizer:
             potion_roi = frame.crop(settings.potion.cap, settings.potion.cap_w, settings.potion.cap_h)
             potion_score, local_xy, potion_match_scale = _template_search(
                 potion_roi, self._potion_target,
-                scale_legacy=250_000.0, _kind="potion",
+                scale_legacy=250_000.0, scales=scales, _kind="potion",
             )
             if local_xy != (-1, -1):
                 potion_match_xy = (settings.potion.cap.x + local_xy[0],
@@ -842,7 +858,7 @@ class Recognizer:
             roi = frame.crop(ov.cap, ov.cap_w, ov.cap_h)
             score, local_xy, scale = _template_search(
                 roi, tmpl,
-                scale_legacy=5_000_000.0, _kind=f"overlay:{ov_id}",
+                scale_legacy=5_000_000.0, scales=scales, _kind=f"overlay:{ov_id}",
             )
             match_xy: tuple[int, int] = (-1, -1)
             if local_xy != (-1, -1):

@@ -132,6 +132,31 @@ def _panel_connection() -> QWidget:
     fps.currentTextChanged.connect(_on_fps)
     conn.add(_form_row("캡처 FPS", fps))
 
+    # 인식 multi-scale 단계 — 1=고정 1.00× / 10=0.60×~1.60× 촘촘.
+    # 단계↑ ⇒ 인식률↑ + CPU↑. 13×13 템플릿 한 프레임당 비용은
+    # 1단계 ≈ 0.3ms, 10단계 ≈ 2.5ms 수준.
+    steps = QComboBox(); steps.addItems([str(n) for n in range(1, 11)])
+    cur_steps = max(1, min(10, int(getattr(mock_settings, "scale_steps", 3) or 3)))
+    steps.setCurrentText(str(cur_steps))
+    if cur_steps != getattr(mock_settings, "scale_steps", 3):
+        mock_settings.scale_steps = cur_steps
+    def _on_steps(text: str) -> None:
+        try:
+            new = int(text)
+        except ValueError:
+            return
+        if mock_settings.scale_steps != new:
+            mock_settings.scale_steps = new
+            bus.settings_dirty.emit()
+    steps.currentTextChanged.connect(_on_steps)
+    steps.setToolTip(
+        "인식 multi-scale 단계 수. 단계가 늘수록 작은/큰 게임창에서도 "
+        "잘 잡지만 CPU 부담이 늘어남.\n"
+        "기본 3 (1.00× ±8%) — 같은 해상도 사용자 권장\n"
+        "7~9 — 창 크기를 자주 바꾸는 경우"
+    )
+    conn.add(_form_row("인식 스케일 단계", steps))
+
     v.addWidget(conn); v.addStretch(1)
     return w
 
