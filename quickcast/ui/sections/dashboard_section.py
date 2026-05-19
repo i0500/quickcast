@@ -139,6 +139,10 @@ class _LivePreviewWrap(QWidget):
             pk_match_scale=analysis.pk_match_scale,
             potion_match_scale=analysis.potion_match_scale,
             overlay_matches=getattr(analysis, "overlay_matches", None),
+            buff_count=getattr(analysis, "buff_count", None),
+            buff_confidence=getattr(analysis, "buff_confidence", 0.0),
+            buff_text=getattr(analysis, "buff_text", ""),
+            buff_scanned=getattr(analysis, "buff_scanned", False),
         )
         self.recognition.emit(
             int(analysis.hp), int(analysis.mp),
@@ -174,6 +178,10 @@ class _LivePreviewWrap(QWidget):
             pk_match_scale=analysis.pk_match_scale,
             potion_match_scale=analysis.potion_match_scale,
             overlay_matches=getattr(analysis, "overlay_matches", None),
+            buff_count=getattr(analysis, "buff_count", None),
+            buff_confidence=getattr(analysis, "buff_confidence", 0.0),
+            buff_text=getattr(analysis, "buff_text", ""),
+            buff_scanned=getattr(analysis, "buff_scanned", False),
         )
         self.recognition.emit(
             analysis.hp, analysis.mp,

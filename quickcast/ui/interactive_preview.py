@@ -30,6 +30,10 @@ ROI_DEFS = [
     ("mp",     "MP",     QColor( 66, 165, 245)),   # blue
     ("pk",     "PK",     QColor(255, 215,   0)),   # gold
     ("potion", "POTION", QColor( 76, 175,  80)),   # green
+    # Buff text ROI — used by the digit-OCR path (replaced the legacy
+    # template-match "buff" entry). Shown whenever Settings.buff.enabled
+    # is True, gated below in _active_roi_defs.
+    ("buff_text", "버프",  QColor(186, 104, 200)),   # purple
 ]
 
 # OCR text-region ROIs. Only painted / hit-tested when settings.ocr_mode
@@ -39,6 +43,9 @@ OCR_ROI_DEFS = [
     ("hp_text",     "HP 텍스트",     QColor(255, 145, 145)),   # light red
     ("mp_text",     "MP 텍스트",     QColor(130, 195, 255)),   # light blue
     ("potion_text", "물약 텍스트",   QColor(170, 220, 170)),   # light green
+    # buff_text intentionally NOT in OCR_ROI_DEFS — it sits in ROI_DEFS
+    # above so it shows up in normal (non-OCR-mode) layouts whenever
+    # Settings.buff.enabled is True.
 ]
 
 # Overlay-close ROIs (pet whistle paw / item acquired chest / …). One
@@ -48,6 +55,7 @@ OCR_ROI_DEFS = [
 OVERLAY_ROI_DEFS: list[tuple[str, str, QColor]] = [
     ("overlay:pet_whistle",   "펫 호루라기",   QColor(255, 145, 215)),   # pink
     ("overlay:item_acquired", "아이템 획득",   QColor(255, 200, 100)),   # amber
+    ("overlay:blood_pledge",  "혈맹 축복",     QColor(200, 130, 130)),   # muted red
 ]
 
 
@@ -187,6 +195,9 @@ class InteractivePreview(QWidget):
         if roi_id == "potion":
             return _RoiRect(s.potion.cap.x, s.potion.cap.y,
                             s.potion.cap_w, s.potion.cap_h)
+        if roi_id == "buff":
+            return _RoiRect(s.buff.cap.x, s.buff.cap.y,
+                            s.buff.cap_w, s.buff.cap_h)
         if roi_id == "hp_text":
             return _RoiRect(s.hp_text_cap.x, s.hp_text_cap.y,
                             s.hp_text_cap_w, s.hp_text_cap_h)
@@ -196,6 +207,9 @@ class InteractivePreview(QWidget):
         if roi_id == "potion_text":
             return _RoiRect(s.potion_text_cap.x, s.potion_text_cap.y,
                             s.potion_text_cap_w, s.potion_text_cap_h)
+        if roi_id == "buff_text":
+            return _RoiRect(s.buff_text_cap.x, s.buff_text_cap.y,
+                            s.buff_text_cap_w, s.buff_text_cap_h)
         if roi_id.startswith("overlay:"):
             ov_id = roi_id.split(":", 1)[1]
             ov = (getattr(s, "overlay_closes", None) or {}).get(ov_id)
@@ -231,6 +245,9 @@ class InteractivePreview(QWidget):
         elif roi_id == "potion":
             s.potion.cap = Point(x=cx, y=cy)
             s.potion.cap_w, s.potion.cap_h = w, h
+        elif roi_id == "buff":
+            s.buff.cap = Point(x=cx, y=cy)
+            s.buff.cap_w, s.buff.cap_h = w, h
         elif roi_id == "hp_text":
             s.hp_text_cap = Point(x=cx, y=cy)
             s.hp_text_cap_w, s.hp_text_cap_h = w, h
@@ -240,6 +257,9 @@ class InteractivePreview(QWidget):
         elif roi_id == "potion_text":
             s.potion_text_cap = Point(x=cx, y=cy)
             s.potion_text_cap_w, s.potion_text_cap_h = w, h
+        elif roi_id == "buff_text":
+            s.buff_text_cap = Point(x=cx, y=cy)
+            s.buff_text_cap_w, s.buff_text_cap_h = w, h
         elif roi_id.startswith("overlay:"):
             ov_id = roi_id.split(":", 1)[1]
             ov = (getattr(s, "overlay_closes", None) or {}).get(ov_id)
@@ -278,7 +298,11 @@ class InteractivePreview(QWidget):
                             potion_match_xy: tuple[int, int] = (-1, -1),
                             pk_match_scale: float = 1.0,
                             potion_match_scale: float = 1.0,
-                            overlay_matches: dict | None = None) -> None:
+                            overlay_matches: dict | None = None,
+                            buff_count: Optional[int] = None,
+                            buff_confidence: float = 0.0,
+                            buff_text: str = "",
+                            buff_scanned: bool = False) -> None:
         """Latest recognition values to overlay near each ROI — short labels only.
 
         Label keys follow the *active* ROI set: in OCR mode the HP / MP /
@@ -322,28 +346,52 @@ class InteractivePreview(QWidget):
                 "pk": "PK 전투" if pk_match else "PK 보통",
                 "potion": "물약 없음" if potion_match else "물약 있음",
             }
+        # Buff OCR label — only attach when the recognizer actually
+        # produced a reading (scanner enabled + ROI set). Shows the
+        # decoded integer right next to the buff_text ROI so users
+        # can visually confirm OCR accuracy without leaving the dash.
+        if buff_scanned:
+            if buff_count is not None:
+                self._roi_value_text["buff_text"] = f"버프 {buff_count}"
+            elif buff_text:
+                self._roi_value_text["buff_text"] = f"버프 ?{buff_text} ({buff_confidence:.2f})"
+            else:
+                self._roi_value_text["buff_text"] = "버프 ? (학습 필요)"
         self.update()
 
     # ───────── coordinate mapping ─────────
     def _compute_render_rect(self) -> QRect:
-        """Letterboxed rect inside the widget where the frame is drawn."""
+        """Letterboxed rect inside the widget where the frame is drawn.
+
+        Uses ``round()`` (not ``int()``) on the scaled dimensions so a
+        720-height frame scaled to non-integer pixel heights doesn't
+        truncate ~0.5 px and silently push every downstream ROI half a
+        pixel up — the "전체화면에서 ROI가 살짝 위로" report.
+        """
         wsz = self.size()
         fw, fh = self._frame_size.width(), self._frame_size.height()
         if fw <= 0 or fh <= 0:
             return QRect(0, 0, wsz.width(), wsz.height())
         scale = min(wsz.width() / fw, wsz.height() / fh)
-        rw, rh = int(fw * scale), int(fh * scale)
+        rw, rh = int(round(fw * scale)), int(round(fh * scale))
         rx = (wsz.width() - rw) // 2
         ry = (wsz.height() - rh) // 2
         return QRect(rx, ry, rw, rh)
 
     def _frame_to_widget(self, fx: int, fy: int) -> QPoint:
+        """Map a frame-space coordinate to widget pixels.
+
+        Round (instead of truncate) so half-pixel scale factors don't
+        snap ROIs systematically toward y=0 / x=0 — the visible
+        "ROI 위치가 위로 올라감" drift at large window sizes.
+        """
         r = self._render_rect
         if r.width() == 0 or r.height() == 0:
             return QPoint(fx, fy)
         sx = r.width() / self._frame_size.width()
         sy = r.height() / self._frame_size.height()
-        return QPoint(int(r.x() + fx * sx), int(r.y() + fy * sy))
+        return QPoint(int(round(r.x() + fx * sx)),
+                       int(round(r.y() + fy * sy)))
 
     def _widget_to_frame(self, wx: int, wy: int) -> Optional[QPoint]:
         r = self._render_rect
@@ -353,8 +401,8 @@ class InteractivePreview(QWidget):
             return None
         sx = self._frame_size.width() / r.width()
         sy = self._frame_size.height() / r.height()
-        fx = int((wx - r.x()) * sx)
-        fy = int((wy - r.y()) * sy)
+        fx = int(round((wx - r.x()) * sx))
+        fy = int(round((wy - r.y()) * sy))
         return QPoint(fx, fy)
 
     # ───────── hit testing ─────────
@@ -376,11 +424,16 @@ class InteractivePreview(QWidget):
         """
         if getattr(self.settings, "ocr_mode", False):
             defs: list[tuple[str, str, QColor]] = [
-                d for d in ROI_DEFS if d[0] == "pk"
+                d for d in ROI_DEFS if d[0] in ("pk", "buff_text")
             ]
             defs.extend(OCR_ROI_DEFS)
         else:
             defs = list(ROI_DEFS)
+        # Buff text ROI only shows when the feature is enabled (avoids
+        # cluttering the preview for users who don't use 마을 대기).
+        buff = getattr(self.settings, "buff", None)
+        if buff is None or not getattr(buff, "enabled", False):
+            defs = [d for d in defs if d[0] != "buff_text"]
         ovc = getattr(self.settings, "overlay_closes", None) or {}
         for roi_id, label, color in OVERLAY_ROI_DEFS:
             ov_key = roi_id.split(":", 1)[1]
@@ -749,6 +802,9 @@ class InteractivePreview(QWidget):
             "hp_text": ("right", "below", "above", "left"),
             "mp_text": ("right", "below", "above", "left"),
             "potion_text": ("above", "right", "below", "left"),
+            # Buff badge sits in the top-left of the game frame, so "right"
+            # keeps the label inside the visible area at any window width.
+            "buff_text": ("right", "below", "above", "left"),
         }
         # Default placement order for any ROI not in the hard-coded
         # prefs (e.g. "overlay:pet_whistle"). Overlay boxes live in

@@ -26,6 +26,59 @@ from quickcast.utils.window_finder import (
 # user configs (and the embedded PK/potion target images).
 TARGET_W = 1280
 TARGET_H = 720
+_TARGET_ASPECT = TARGET_W / TARGET_H
+
+
+def _letterbox_into(raw: np.ndarray, dst: np.ndarray) -> None:
+    """Resize ``raw`` into ``dst`` (1280×720) preserving source aspect.
+
+    Replaces the legacy ``cv2.resize`` stretch that warped non-16:9 sources
+    onto the 16:9 frame — game UI elements got squished vertically (16:10
+    fullscreen) or horizontally (5:4 laptop), and ROIs calibrated at one
+    aspect didn't fit any other.
+
+    Letterboxing keeps the source's pixel proportions intact: the content
+    is uniformly scaled to fit inside ``dst`` and the remaining margin
+    (top/bottom for wider-than-target, left/right for taller-than-target)
+    is filled with black. Recognition still runs on a 1280×720 frame so
+    no downstream code needs to change.
+    """
+    import cv2
+    sh, sw = raw.shape[:2]
+    if sw <= 0 or sh <= 0:
+        dst.fill(0)
+        return
+    if sw == TARGET_W and sh == TARGET_H:
+        np.copyto(dst, raw)
+        return
+    src_aspect = sw / sh
+    # Tolerance band around 16:9 — anything within ±5 % stretches to the
+    # full 1280×720 frame instead of letterboxing. Catches the bordered
+    # / windowed-fullscreen case where the game's client area is
+    # monitor_w × (monitor_h - title_bar) ≈ 1920×1040 (aspect 1.846).
+    # Strict letterboxing there put ~10 px black bars top+bottom and
+    # silently pushed every calibrated ROI down by the bar height —
+    # the "테두리 있는 전체화면에서 ROI 위치 틀어짐" report. 5 % keeps
+    # genuinely different aspects (5:4 / 16:10 / ultrawide) letterboxed.
+    if abs(src_aspect - _TARGET_ASPECT) / _TARGET_ASPECT < 0.05:
+        cv2.resize(raw, (TARGET_W, TARGET_H), dst=dst,
+                    interpolation=cv2.INTER_AREA)
+        return
+    # Fit inside (the smaller dimension wins, the other gets bars).
+    if src_aspect > _TARGET_ASPECT:
+        # wider than 16:9 — bars top + bottom.
+        new_w = TARGET_W
+        new_h = max(1, int(round(TARGET_W / src_aspect)))
+    else:
+        # taller than 16:9 — bars left + right.
+        new_h = TARGET_H
+        new_w = max(1, int(round(TARGET_H * src_aspect)))
+    interp = cv2.INTER_AREA if (new_w < sw or new_h < sh) else cv2.INTER_LINEAR
+    resized = cv2.resize(raw, (new_w, new_h), interpolation=interp)
+    dst.fill(0)
+    ox = (TARGET_W - new_w) // 2
+    oy = (TARGET_H - new_h) // 2
+    dst[oy:oy + new_h, ox:ox + new_w] = resized
 
 
 @dataclass
@@ -89,12 +142,7 @@ class _MssBase:
     def _to_target_frame(self, raw: np.ndarray) -> Frame:
         dst = self._pool[self._pool_idx]
         self._pool_idx = (self._pool_idx + 1) % len(self._pool)
-        if raw.shape[1] != TARGET_W or raw.shape[0] != TARGET_H:
-            import cv2
-            cv2.resize(raw, (TARGET_W, TARGET_H),
-                       dst=dst, interpolation=cv2.INTER_AREA)
-        else:
-            np.copyto(dst, raw)
+        _letterbox_into(raw, dst)
         return Frame(image=dst)
 
     def close(self) -> None:

@@ -278,8 +278,16 @@ class OcrCalibrationDialog(QDialog):
         # a clean shape-only matchTemplate. Uses the median of THIS
         # training pass's box sizes when no canonical was set yet.
         if self._domain:
-            from quickcast.core.digit_store import ensure_canonical_from_boxes
+            from quickcast.core.digit_store import (
+                ensure_canonical_from_boxes, write_threshold,
+            )
             ensure_canonical_from_boxes(self._domain, boxes)
+            # Persist THIS domain's binarisation threshold next to its
+            # templates so inference (recognition.py) uses the exact
+            # cutoff the templates were learned at. Previously the dialog
+            # only updated a single global Settings.ocr_threshold which
+            # meant retraining one domain silently broke the others.
+            write_threshold(thr_val, domain=self._domain)
         self._templates = new_templates
         self._added_per_label = added_per_label
         self.accept()

@@ -14,7 +14,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from quickcast.ui.components.card import Card
@@ -229,10 +229,14 @@ def make_capture() -> tuple[QWidget, QWidget]:
     title = QLabel("캡처")
     f = QFont(); f.setBold(True); f.setPointSize(18); title.setFont(f)
     sub = QLabel("게임창 선택 + ROI 좌표 미세조정. 미리보기 위에서 사각형 드래그도 가능")
+    # Word-wrap + Ignored horizontal policy so the long subtitle doesn't
+    # push the scroll area's inner widget past viewport width.
+    sub.setWordWrap(True)
+    sub.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     reactive(sub, lambda: f"color:{T.palette.text_secondary};")
     box = QVBoxLayout(); box.setContentsMargins(0, 0, 0, 0); box.setSpacing(0)
     box.addWidget(title); box.addWidget(sub)
-    header.addLayout(box); header.addStretch(1)
+    header.addLayout(box, stretch=1)
     pick_btn = IconButton("게임창 선택", "crosshair", variant="primary")
     pick_btn.clicked.connect(lambda: _open_window_picker(main))
     header.addWidget(pick_btn)
@@ -279,6 +283,25 @@ def make_capture() -> tuple[QWidget, QWidget]:
     cb.setMinimumWidth(160)
     fallback.addWidget(fallback_lbl); fallback.addWidget(cb); fallback.addStretch(1)
     opts.add(fallback)
+
+    # Aspect-profile lock — when ON (default), the same ROI calibration is
+    # used regardless of detected source aspect. Combined with the
+    # letterbox normalisation in core/capture.py this means a single
+    # calibration works in fullscreen and windowed mode.
+    lock_row = QHBoxLayout(); lock_row.setSpacing(8)
+    lock_cb = QCheckBox("Aspect 프로파일 잠금 (전체화면/창모드 동일 ROI)")
+    lock_cb.setChecked(bool(getattr(mock_settings, "lock_aspect_profile", True)))
+    lock_cb.setToolTip(
+        "ON: 소스 aspect가 바뀌어도 ROI 보정값을 그대로 사용 (letterbox 정규화).\n"
+        "OFF: aspect별로 별도의 ROI 프로파일을 자동 스왑 (예전 동작)."
+    )
+    def _on_lock_aspect(on: bool) -> None:
+        if getattr(mock_settings, "lock_aspect_profile", True) != on:
+            mock_settings.lock_aspect_profile = on
+            bus.settings_dirty.emit()
+    lock_cb.toggled.connect(_on_lock_aspect)
+    lock_row.addWidget(lock_cb); lock_row.addStretch(1)
+    opts.add(lock_row)
     v.addWidget(opts)
 
     # ROI coordinates — fully bound to settings.
@@ -320,6 +343,15 @@ def make_capture() -> tuple[QWidget, QWidget]:
         lambda: mock_settings.potion.cap_w, lambda v: setattr(mock_settings.potion, "cap_w", v),
         lambda: mock_settings.potion.cap_h, lambda v: setattr(mock_settings.potion, "cap_h", v),
         reset_kind="potion",
+    ))
+    # Buff count (top-left "75") — feeds the recovery 마을 대기 trigger
+    roi.add(_coord_block(
+        "버프 카운트",
+        lambda: mock_settings.buff.cap.x, lambda v: setattr(mock_settings.buff.cap, "x", v),
+        lambda: mock_settings.buff.cap.y, lambda v: setattr(mock_settings.buff.cap, "y", v),
+        lambda: mock_settings.buff.cap_w, lambda v: setattr(mock_settings.buff, "cap_w", v),
+        lambda: mock_settings.buff.cap_h, lambda v: setattr(mock_settings.buff, "cap_h", v),
+        reset_kind="buff",
     ))
     v.addWidget(roi)
 
@@ -607,12 +639,244 @@ def make_capture() -> tuple[QWidget, QWidget]:
     if not OCR_FEATURE_ENABLED:
         ocr_card.setVisible(False)
 
+    # ────────────────── 버프 카운트 OCR ──────────────────
+    # 마을 대기 트리거 전용. HP/MP/물약 OCR이 비활성이어도 항상 노출 —
+    # 사냥터 복귀 매크로의 town_idle 트리거에 꼭 필요한 입력.
+    buff_card = _build_buff_ocr_card(state, main)
+    v.addWidget(buff_card)
+
     # ────────────────── 오버레이 자동 닫기 ──────────────────
     overlay_card = _build_overlay_close_card()
     v.addWidget(overlay_card)
 
     v.addStretch(1)
     return sidebar, main
+
+
+# ────────── buff-count OCR card ──────────
+def _build_buff_ocr_card(state: dict, parent: "QWidget") -> "QWidget":
+    """버프 카운트(좌상단 75) OCR — 마을 대기 복귀 트리거의 입력 채널.
+
+    HP/MP/물약 OCR 카드와 같은 학습 파이프라인을 쓰지만, 그쪽은 일시
+    숨김(`OCR_FEATURE_ENABLED=False`) 상태라 별도 카드로 노출. 사용자가
+    여기서 ROI/임계값을 보정하고 [학습] 버튼으로 0~9 글자를 한 번 학습.
+
+    마을 대기 ON/OFF 토글 + 임계값/지속 시간/학습 등 모든 town-idle 설정이
+    이 카드 한 곳에 모입니다. 전투대응 탭 recovery 카드에는 이 항목들이
+    중복 노출되지 않습니다(단일 진실 원천).
+    """
+    from quickcast.ui.ios_toggle import IOSToggle
+
+    rec = mock_settings.recovery
+    buff_obj = getattr(mock_settings, "buff", None)
+
+    card = Card(
+        "버프 카운트 OCR — 마을 대기 인식",
+        subtitle=(
+            "좌상단 버프 갯수(예: 75)를 텍스트로 인식. 인식값이 임계값 미만으로"
+            " ‘지속 시간’ 이상 유지되면 사냥터 복귀 시퀀스가 자동 실행됩니다.\n"
+            "1) 토글 ON → 2) ROI 박스 위치 맞추기 → 3) [학습]으로 0~9 글자 학습."
+        ),
+        inline_subtitle=False,
+    )
+
+    # ── 마을 대기 ON/OFF 토글 (오버레이 자동 닫기 카드와 동일 패턴) ──
+    # 한 토글이 recovery.trigger_town_idle + buff.enabled 두 플래그를
+    # 동시에 켜고 끔. 인식 파이프라인이 OCR 스캔 자체를 시작하려면
+    # buff.enabled, 복귀 트리거 조건으로 쓰려면 trigger_town_idle 둘 다 필요.
+    toggle_row = QHBoxLayout(); toggle_row.setSpacing(8); toggle_row.setContentsMargins(0, 0, 0, 0)
+    toggle = IOSToggle(width=44, height=22)
+    initial_on = bool(rec.trigger_town_idle) and bool(buff_obj is not None and buff_obj.enabled)
+    toggle.set_state(initial_on, animate=False)
+    toggle_lbl = QLabel("마을 대기 사용")
+    fnt = QFont(); fnt.setBold(True); toggle_lbl.setFont(fnt)
+    reactive(toggle_lbl, lambda: f"color:{T.palette.text_primary};")
+    toggle_hint = QLabel("(버프 카운트 OCR로 마을 체류 감지 → 사냥터 복귀)")
+    reactive(toggle_hint, lambda: f"color:{T.palette.text_tertiary}; font-size:11px;")
+
+    def _on_toggle(on: bool) -> None:
+        changed = False
+        if rec.trigger_town_idle != on:
+            rec.trigger_town_idle = on; changed = True
+        if buff_obj is not None and bool(buff_obj.enabled) != on:
+            buff_obj.enabled = on; changed = True
+        if changed:
+            bus.settings_dirty.emit()
+    toggle.toggled.connect(_on_toggle)
+
+    toggle_row.addWidget(toggle)
+    toggle_row.addWidget(toggle_lbl)
+    toggle_row.addWidget(toggle_hint)
+    toggle_row.addStretch(1)
+    card.add(toggle_row)
+
+    # ROI 좌표 행
+    coord = _coord_block(
+        "ROI",
+        lambda: mock_settings.buff_text_cap.x,
+        lambda v: setattr(mock_settings.buff_text_cap, "x", v),
+        lambda: mock_settings.buff_text_cap.y,
+        lambda v: setattr(mock_settings.buff_text_cap, "y", v),
+        lambda: mock_settings.buff_text_cap_w,
+        lambda v: setattr(mock_settings, "buff_text_cap_w", v),
+        lambda: mock_settings.buff_text_cap_h,
+        lambda v: setattr(mock_settings, "buff_text_cap_h", v),
+        reset_kind="buff_text",
+    )
+    card.add(coord)
+
+    # 임계값 + 학습 행
+    actions = QHBoxLayout(); actions.setSpacing(10)
+    thr_lbl = QLabel("임계값 (이 값 미만이면 마을):")
+    reactive(thr_lbl, lambda: f"color:{T.palette.text_secondary};")
+    actions.addWidget(thr_lbl)
+    from quickcast.ui.stepper import Stepper
+    thr_in = Stepper(
+        mock_settings.recovery.town_idle_threshold, 1, 999, 1, 0, "", width=100,
+    )
+    def _on_thr(val: float) -> None:
+        new = int(val)
+        if mock_settings.recovery.town_idle_threshold != new:
+            mock_settings.recovery.town_idle_threshold = new
+            bus.settings_dirty.emit()
+    thr_in.valueChanged.connect(_on_thr)
+    actions.addWidget(thr_in)
+    actions.addStretch(1)
+
+    learn_btn = IconButton("학습 (0~9)", "settings", variant="primary", size="sm")
+    learn_btn.setToolTip("현재 캡처 프레임에서 버프 ROI를 잘라 OCR 글자 학습 다이얼로그 실행")
+    def _train() -> None:
+        frame = state.get("frame")
+        if frame is None:
+            QMessageBox.information(parent, "버프 OCR 학습",
+                "캡처가 활성화된 후 시도해주세요. (게임창 선택 + 마스터 시작)")
+            return
+        w, h = mock_settings.buff_text_cap_w, mock_settings.buff_text_cap_h
+        if w <= 0 or h <= 0:
+            QMessageBox.information(parent, "버프 OCR 학습",
+                "ROI W/H가 0입니다. 먼저 ROI 좌표 행에서 박스 크기를 입력하거나 [리셋] 누르세요.")
+            return
+        x, y = mock_settings.buff_text_cap.x, mock_settings.buff_text_cap.y
+        try:
+            roi = frame[y : y + h, x : x + w]
+        except Exception:
+            roi = None
+        if roi is None or roi.size == 0:
+            QMessageBox.warning(parent, "버프 OCR 학습",
+                "ROI 잘라내기 실패. 좌표가 1280×720 범위 안인지 확인해주세요.")
+            return
+        # Mirror the 2× upsample that recognition.py applies to the
+        # buff_text ROI before OCR — keeps training segmentation and
+        # inference segmentation consistent so the templates the user
+        # labels here are the same shape glyphs the matcher sees later.
+        import cv2 as _cv2
+        rh, rw = roi.shape[:2]
+        roi = _cv2.resize(roi, (rw * 2, rh * 2),
+                            interpolation=_cv2.INTER_CUBIC)
+        from quickcast.ui.components.ocr_calibration import OcrCalibrationDialog
+        dlg = OcrCalibrationDialog(np.ascontiguousarray(roi),
+                                      suggested_truth="",
+                                      parent=parent,
+                                      domain="buff")
+        if dlg.exec():
+            thr = dlg.chosen_threshold()
+            mock_settings.ocr_threshold = int(thr) if thr is not None else 0
+            bus.settings_dirty.emit()
+            try:
+                bus.digit_templates_changed.emit()
+            except Exception:
+                pass
+            from quickcast.ui.components.notification_center import NotificationCenter
+            from quickcast.core.digit_store import instance_counts
+            added = dlg.added_summary()
+            counts = instance_counts(domain="buff")
+            if added:
+                bits = [f"{ch} +{n} (총 {counts.get(ch, n)})" for ch, n in sorted(added.items())]
+                NotificationCenter.toast("🔤 버프 OCR 학습 추가 — " + ", ".join(bits),
+                                          level="success", duration_ms=3200)
+    learn_btn.clicked.connect(_train)
+    actions.addWidget(learn_btn)
+
+    # 학습 초기화 버튼 — 누적된 버프 글자 템플릿 + 임계값 + canonical
+    # 메타파일까지 한 번에 삭제. ROI 좌표 리셋과는 별개 (그건 "리셋").
+    reset_learn_btn = IconButton("학습 초기화", "trash-2", variant="ghost", size="sm")
+    reset_learn_btn.setToolTip(
+        "지금까지 학습한 버프 0~9 글자 + 임계값 + canonical 크기를 모두 삭제.\n"
+        "ROI 좌표는 그대로 유지됩니다. 되돌릴 수 없으니 주의."
+    )
+    def _reset_learning() -> None:
+        from quickcast.core.digit_store import instance_counts, clear_templates
+        cur = instance_counts(domain="buff")
+        total = sum(cur.values())
+        if total == 0:
+            QMessageBox.information(parent, "버프 학습 초기화",
+                "초기화할 학습 데이터가 없습니다.")
+            return
+        ret = QMessageBox.question(
+            parent, "버프 학습 초기화",
+            f"버프 도메인에 학습된 글자 {total}개를 모두 삭제할까요?\n"
+            f"({', '.join(f'{k}={v}' for k, v in sorted(cur.items()))})\n\n"
+            "ROI 좌표/임계값 슬라이더 설정은 유지되지만, "
+            "도메인의 .threshold/.canonical 메타파일도 함께 삭제됩니다.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if ret != QMessageBox.Yes:
+            return
+        deleted = clear_templates(domain="buff")
+        try:
+            bus.digit_templates_changed.emit()
+        except Exception:
+            pass
+        from quickcast.ui.components.notification_center import NotificationCenter
+        NotificationCenter.toast(
+            f"🧹 버프 학습 데이터 초기화됨 ({deleted}개 파일 삭제)",
+            level="info", duration_ms=2800,
+        )
+    reset_learn_btn.clicked.connect(_reset_learning)
+    actions.addWidget(reset_learn_btn)
+    card.add(actions)
+
+    # ── 지속 시간 (마을 대기 시간) — 분 단위 ──
+    # OCR 값이 임계값 미만으로 이 시간 이상 유지되면 복귀 시퀀스 발동.
+    # 사냥터 복귀의 "귀환 후 시작 대기"(start_delay_seconds)와는 다른 개념:
+    #   • town_idle_seconds  → 마을 상태로 "판정"하기 위한 누적 시간 (입력 측)
+    #   • start_delay_seconds → 트리거 후 클릭 시퀀스 시작까지 대기 (출력 측)
+    dur_row = QHBoxLayout(); dur_row.setSpacing(10)
+    dur_lbl = QLabel("지속 시간 (이 시간 이상 마을이면 복귀):")
+    reactive(dur_lbl, lambda: f"color:{T.palette.text_secondary};")
+    dur_row.addWidget(dur_lbl)
+    dur_in = Stepper(rec.town_idle_seconds / 60.0, 1.0, 30.0, 1.0, 0, "분", width=120)
+    dur_in.setToolTip("OCR로 읽은 버프 갯수가 임계값 미만으로 이 시간 동안 유지되면 복귀 시퀀스 실행")
+    def _on_dur(v: float) -> None:
+        new = int(round(max(1.0, v) * 60))
+        if rec.town_idle_seconds != new:
+            rec.town_idle_seconds = new
+            bus.settings_dirty.emit()
+    dur_in.valueChanged.connect(_on_dur)
+    dur_row.addWidget(dur_in)
+    dur_row.addStretch(1)
+    card.add(dur_row)
+
+    # 실시간 인식 결과 표시
+    live = QLabel("OCR 결과: -")
+    reactive(live, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono};")
+    card.add(live)
+
+    def _on_analysis(_image, analysis, _fps):
+        if analysis is None:
+            return
+        cnt = getattr(analysis, "buff_count", None)
+        conf = getattr(analysis, "buff_confidence", 0.0)
+        text = getattr(analysis, "buff_text", "")
+        thr_n = mock_settings.recovery.town_idle_threshold
+        if cnt is None:
+            live.setText(f"OCR 결과: text={text!r}  conf={conf:.2f}  (값 미확정)")
+        else:
+            tag = "마을 대기 ▼" if cnt < thr_n else "정상"
+            live.setText(f"OCR 결과: {cnt}  conf={conf:.2f}  [{tag}, 임계={thr_n}]")
+    bus.live_frame.connect(_on_analysis)
+
+    return card
 
 
 # ────────── overlay-close card ──────────
@@ -622,6 +886,7 @@ def make_capture() -> tuple[QWidget, QWidget]:
 _OVERLAY_LABELS: dict[str, str] = {
     "pet_whistle": "펫 호루라기 (교감 성공 발바닥)",
     "item_acquired": "아이템 획득 (보상 상자)",
+    "blood_pledge": "혈맹 축복 활성화",
 }
 
 
@@ -653,13 +918,29 @@ def _build_overlay_close_card() -> "QWidget":
 
     def _make_row(ov_id: str) -> QWidget:
         # Pull/create the OverlayClose entry — gracefully handles a
-        # legacy userdata.json that predates this feature.
+        # legacy userdata.json that predates this feature. When a new
+        # overlay is being added (e.g. blood_pledge introduced after
+        # the user already calibrated pet/item), seed it from the
+        # existing item_acquired / pet_whistle so it lines up with
+        # the centered-popup area the user has already dialed in.
         oc_dict = getattr(mock_settings, "overlay_closes", None)
         if oc_dict is None:
             mock_settings.overlay_closes = {}    # type: ignore[attr-defined]
             oc_dict = mock_settings.overlay_closes
         if ov_id not in oc_dict:
-            oc_dict[ov_id] = OverlayClose()
+            seed = oc_dict.get("item_acquired") or oc_dict.get("pet_whistle")
+            if seed is not None:
+                oc_dict[ov_id] = OverlayClose(
+                    cap=Point(x=seed.cap.x, y=seed.cap.y),
+                    cap_w=int(seed.cap_w),
+                    cap_h=int(seed.cap_h),
+                    threshold=int(seed.threshold),
+                    close_key=seed.close_key,
+                    cooldown_seconds=float(seed.cooldown_seconds),
+                    sustain_seconds=float(seed.sustain_seconds),
+                )
+            else:
+                oc_dict[ov_id] = OverlayClose()
         ov = oc_dict[ov_id]
         _ensure_default_roi(ov)
 
@@ -796,9 +1077,9 @@ def _build_overlay_close_card() -> "QWidget":
 
         return wrap
 
-    # 펫 호루라기 + 아이템 획득 둘 다 노출. 같은 ROI(중앙 팝업 영역)와
-    # 임계값 기본값을 공유하므로 UI 형태는 완전히 동일.
-    for ov_id in ("pet_whistle", "item_acquired"):
+    # 펫 호루라기 + 아이템 획득 + 혈맹 축복 셋 다 노출. 같은 ROI(중앙 팝업
+    # 영역)와 임계값 기본값을 공유하므로 UI 형태는 완전히 동일.
+    for ov_id in ("pet_whistle", "item_acquired", "blood_pledge"):
         card.add(_make_row(ov_id))
 
     # Wire live overlay scores from the analysis stream into the score

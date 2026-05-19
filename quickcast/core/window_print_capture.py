@@ -23,7 +23,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from quickcast.core.capture import Frame, TARGET_H, TARGET_W
+from quickcast.core.capture import Frame, TARGET_H, TARGET_W, _letterbox_into
 from quickcast.utils.window_finder import is_window_alive
 
 # ── Win32 prototypes ────────────────────────────────────────────────
@@ -214,10 +214,20 @@ class WindowPrintCapture:
             ok = user32.PrintWindow(self.hwnd, hdc_mem, PW_RENDERFULLCONTENT)
             if not ok:
                 ok = user32.PrintWindow(self.hwnd, hdc_mem, PW_CLIENTONLY)
-            if not ok and not minimized:
-                # BitBlt only works for visible windows. Skip when
-                # minimised — would just produce a black frame.
-                gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_window, 0, 0, SRCCOPY)
+            if not ok:
+                # Both PrintWindow flavours refused. We *used* to fall back
+                # to BitBlt(hdc_window) — but that reads from the window's
+                # actual screen position, so when another window is on top
+                # of the game the matcher saw the OVERLAPPING window's
+                # pixels (the "다른 화면이 같이 캡처됨" bug). Returning the
+                # last known good frame keeps recognition on rails until
+                # PrintWindow recovers; if we have nothing cached yet, we
+                # raise so the controller's error path takes over.
+                if self._last_frame is not None:
+                    return self._last_frame
+                raise RuntimeError(
+                    "PrintWindow refused and no cached frame to fall back on"
+                )
 
             # Pull the bitmap bits into the reusable destination buffer.
             # Reallocate only when the source size changes — typically
@@ -252,14 +262,14 @@ class WindowPrintCapture:
         # advance keeps in-flight frames (held by the Qt signal queue
         # or the controller's _latest_frame slot) from being overwritten
         # mid-render. Frame.image references the pool slot directly —
-        # zero alloc per grab on the steady-state path.
+        # zero alloc per grab on the steady-state path. ``_letterbox_into``
+        # preserves source aspect (top/bottom or left/right bars) so a
+        # 16:10 or 5:4 source doesn't get vertically/horizontally
+        # squished — the previous cv2.resize stretch was the root of
+        # "ROI 사이즈가 모드 바뀌면 달라짐" complaint.
         dst = self._pool[self._pool_idx]
         self._pool_idx = (self._pool_idx + 1) % len(self._pool)
-        if w != TARGET_W or h != TARGET_H:
-            cv2.resize(arr, (TARGET_W, TARGET_H),
-                       dst=dst, interpolation=cv2.INTER_AREA)
-        else:
-            np.copyto(dst, arr)
+        _letterbox_into(arr, dst)
         frame = Frame(image=dst)
         # Cache so subsequent grabs survive transient minimisation.
         self._last_frame = frame

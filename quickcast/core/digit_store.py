@@ -38,8 +38,9 @@ import numpy as np
 _DIR_NAME_OVERRIDES = {"/": "slash"}
 _FILE_NAME_OVERRIDES = _DIR_NAME_OVERRIDES
 
-DOMAINS: tuple[str, ...] = ("hp", "mp", "potion")
+DOMAINS: tuple[str, ...] = ("hp", "mp", "potion", "buff")
 _CANONICAL_FILE = ".canonical"
+_THRESHOLD_FILE = ".threshold"    # one int 0..255 (or empty = auto)
 
 
 def _label_to_dirname(label: str) -> str:
@@ -70,12 +71,21 @@ def _dirname_to_label(name: str) -> Optional[str]:
 
 
 def digits_dir() -> Path:
-    """Return the writable root for learned digit PNGs."""
-    if getattr(sys, "frozen", False):
-        appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "QuickCast" / "digits"
-    return Path(__file__).resolve().parent.parent / "data" / "digits"
+    """Return the writable root for learned digit PNGs.
+
+    Always lives next to ``userdata.json`` (see config.quickcast_data_dir).
+    Falls back to the in-tree path only on the very early bootstrap error
+    case where config isn't importable yet.
+    """
+    try:
+        from quickcast.config import quickcast_data_dir
+        return quickcast_data_dir() / "digits"
+    except Exception:
+        if getattr(sys, "frozen", False):
+            appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+            if appdata:
+                return Path(appdata) / "QuickCast" / "digits"
+        return Path(__file__).resolve().parent.parent / "data" / "digits"
 
 
 def domain_dir(domain: Optional[str] = None) -> Path:
@@ -208,7 +218,12 @@ def clear_label(label: str, domain: Optional[str] = None,
 
 def clear_templates(domain: Optional[str] = None,
                      path: Optional[Path] = None) -> int:
-    """Delete every learned mask in one domain (or the legacy root)."""
+    """Delete every learned mask in one domain (or the legacy root).
+
+    Also clears the domain's learned binarisation threshold so a
+    fresh re-train doesn't keep the stale cutoff from the previous
+    session.
+    """
     p = path or domain_dir(domain)
     if not p.exists():
         return 0
@@ -235,6 +250,14 @@ def clear_templates(domain: Optional[str] = None,
                 entry.unlink(); n += 1
             except OSError:
                 pass
+    # Wipe the learned threshold marker too — a re-train pass will
+    # rewrite it when the user picks a new cutoff in the dialog.
+    thr_file = p / _THRESHOLD_FILE
+    if thr_file.exists():
+        try:
+            thr_file.unlink()
+        except OSError:
+            pass
     return n
 
 
@@ -274,6 +297,52 @@ def write_canonical(width: int, height: int,
     )
 
 
+# ───────── Per-domain binarisation threshold ─────────
+# Each domain's templates are learned at a specific binarisation
+# threshold; matching at a different threshold produces non-matching
+# binary masks. Previously the threshold lived in a single global
+# Settings.ocr_threshold which made re-training a different domain
+# overwrite the others. Per-domain storage keeps each domain's
+# learned threshold next to its templates so inference always uses
+# the right one.
+
+def read_threshold(domain: Optional[str] = None) -> Optional[int]:
+    """Return the binarisation threshold the named domain was trained
+    at (0..255), or None when no learned value is stored.
+    """
+    p = domain_dir(domain) / _THRESHOLD_FILE
+    if not p.exists():
+        return None
+    try:
+        txt = p.read_text(encoding="utf-8").strip()
+        if not txt:
+            return None
+        return max(0, min(255, int(txt)))
+    except Exception:
+        return None
+
+
+def write_threshold(value: Optional[int], domain: Optional[str] = None) -> None:
+    """Persist the binarisation threshold for one domain.
+
+    ``None`` removes the file (signals "use auto-percentile"), an int
+    in 0..255 writes that value. Out-of-range integers are clamped.
+    """
+    p = domain_dir(domain)
+    p.mkdir(parents=True, exist_ok=True)
+    target = p / _THRESHOLD_FILE
+    if value is None:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        return
+    v = max(0, min(255, int(value)))
+    target.write_text(str(v), encoding="utf-8")
+
+
 def ensure_canonical_from_boxes(domain: str,
                                   boxes: list[tuple[int, int, int, int]],
                                   ) -> tuple[int, int]:
@@ -302,4 +371,5 @@ __all__ = [
     "load_templates", "save_templates",
     "clear_label", "clear_templates", "instance_counts",
     "read_canonical", "write_canonical", "ensure_canonical_from_boxes",
+    "read_threshold", "write_threshold",
 ]

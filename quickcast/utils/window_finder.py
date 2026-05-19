@@ -75,8 +75,62 @@ def _window_title(hwnd: int) -> str:
     return buf.value
 
 
-def _find_one(pattern: str) -> Optional[int]:
-    """Single-pattern enumeration with EXCLUDE_PATTERNS filtering."""
+# Minimum size for a window to be considered a game candidate. A
+# "PURPLE" launcher's collapsed title bar registers as ~160×28 and
+# would match the "PURPLE" pattern, but it's clearly not the game —
+# anything smaller than this gate is dropped during auto-detect so a
+# closed/minimised game doesn't auto-rebind to a launcher artefact.
+#
+# Threshold tuned down from 600×400 → 320×240 after a user-windowed
+# Lineage W (smallish floating mode) got rejected and forced the app
+# into monitor fallback. Both axes must clear the gate, so portrait
+# 400×800 still passes and the launcher 160×28 still fails.
+_MIN_GAME_W = 320
+_MIN_GAME_H = 240
+
+
+def _window_size(hwnd: int) -> tuple[int, int]:
+    """Return (width, height) of hwnd's outer rect, (0,0) on failure.
+
+    Iconified (minimised) windows have a parked rect at ~(-32000,-32000)
+    with a tiny size — we fall back to ``GetWindowPlacement.rcNormalPosition``
+    so the size gate sees the restored dimensions rather than the
+    taskbar-thumb dimensions.
+    """
+    # IsIconic is missing from wintypes — bind ad-hoc.
+    try:
+        is_iconic = bool(user32.IsIconic(hwnd))
+    except Exception:
+        is_iconic = False
+    if is_iconic:
+        class _WP(ctypes.Structure):
+            _fields_ = [
+                ("length", wintypes.UINT),
+                ("flags", wintypes.UINT),
+                ("showCmd", wintypes.UINT),
+                ("ptMinPosition", wintypes.POINT),
+                ("ptMaxPosition", wintypes.POINT),
+                ("rcNormalPosition", wintypes.RECT),
+            ]
+        wp = _WP(); wp.length = ctypes.sizeof(_WP)
+        if user32.GetWindowPlacement(hwnd, ctypes.byref(wp)):
+            r = wp.rcNormalPosition
+            return (r.right - r.left, r.bottom - r.top)
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return (0, 0)
+    return (rect.right - rect.left, rect.bottom - rect.top)
+
+
+def _find_one(pattern: str, *, min_w: int = _MIN_GAME_W,
+                min_h: int = _MIN_GAME_H) -> Optional[int]:
+    """Single-pattern enumeration with EXCLUDE_PATTERNS + size filtering.
+
+    Size gate keeps a launcher's collapsed title bar (~160×28) from being
+    picked when the game itself isn't running. Pass ``min_w=0, min_h=0``
+    to disable the gate (e.g. for the window-picker UI which lists every
+    visible window regardless of size).
+    """
     excludes = [p.lower() for p in EXCLUDE_PATTERNS]
     needle = pattern.lower()
     found: list[int] = []
@@ -90,16 +144,21 @@ def _find_one(pattern: str) -> Optional[int]:
             return True
         if any(x in title for x in excludes):
             return True
-        if needle in title:
-            found.append(hwnd)
-            return False
-        return True
+        if needle not in title:
+            return True
+        if min_w > 0 or min_h > 0:
+            w, h = _window_size(hwnd)
+            if w < min_w or h < min_h:
+                return True
+        found.append(hwnd)
+        return False
 
     user32.EnumWindows(cb, 0)
     return found[0] if found else None
 
 
-def find_window(patterns: list[str] | None = None) -> Optional[int]:
+def find_window(patterns: list[str] | None = None,
+                  *, enforce_min_size: bool = True) -> Optional[int]:
     """Return HWND of the first window matching one of `patterns`.
 
     Patterns are tried IN ORDER — the most specific / preferred pattern
@@ -108,10 +167,18 @@ def find_window(patterns: list[str] | None = None) -> Optional[int]:
     "Lineage" steam tile.
 
     `EXCLUDE_PATTERNS` always filters out IDE/terminal/browser windows.
+    When ``enforce_min_size`` is True (the default), candidate windows
+    must be at least _MIN_GAME_W × _MIN_GAME_H pixels — keeps launcher
+    title-bar artefacts (~160×28) from being auto-picked when the
+    game itself isn't running.
     """
     pats = patterns or DEFAULT_PATTERNS
+    if enforce_min_size:
+        kwargs = {}    # use module defaults
+    else:
+        kwargs = {"min_w": 0, "min_h": 0}
     for p in pats:
-        hwnd = _find_one(p)
+        hwnd = _find_one(p, **kwargs)
         if hwnd:
             return hwnd
     return None

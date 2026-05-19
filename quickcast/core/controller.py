@@ -72,6 +72,11 @@ class MacroController:
         # 오버레이가 처음 감지된 시각 — sustain_seconds 동안 연속 유지될
         # 때만 close_key를 보낸다. detected=False가 되면 즉시 클리어.
         self._overlay_first_seen_at: dict[str, float] = {}
+        # Town-idle trigger — timestamp of the first frame where the
+        # buff badge stopped matching. Cleared when the badge returns
+        # (full count restored) or recovery sequence fires. None means
+        # "badge currently matches, nothing pending".
+        self._town_idle_started_at: Optional[float] = None
 
     # ───────── lifecycle ─────────
     def start(self) -> None:
@@ -111,6 +116,9 @@ class MacroController:
             # cycle starts with all triggers eligible again.
             self.state.recovery_handled.clear()
             self.state._last_recovery_at = 0.0
+            # Reset town-idle accumulator too — re-enabling shouldn't
+            # immediately fire on a stale timer from the previous run.
+            self._town_idle_started_at = None
             self.state.begin_master_grace(3.0)
             logger.info("🟢 마스터 ON  (3초 후 가동, 모든 쿨타임 초기화)")
         else:
@@ -187,7 +195,14 @@ class MacroController:
         ``settings_dirty`` (so AppWindow's debounced save writes the
         newly-active profile to disk) and ``aspect_changed`` (so the
         preview / status bar can repaint with the new coords).
+
+        Skipped entirely when ``settings.lock_aspect_profile`` is True
+        (the default) — letterboxing in the capture layer now preserves
+        source aspect, so a single ROI calibration works across all
+        source aspects without auto-swapping.
         """
+        if getattr(self.settings, "lock_aspect_profile", True):
+            return
         size = getattr(self.capture, "last_source_size", None)
         if not size or size[0] <= 0 or size[1] <= 0:
             return
@@ -455,13 +470,54 @@ class MacroController:
         if rec.trigger_hp_zero and analysis.hp <= 1:
             fire_set.add("hp_zero")
 
+        # ── Town-idle: OCR-read buff count fell below threshold and stayed
+        # there for ``town_idle_seconds``. Only meaningful when the OCR
+        # scanner actually produced a confident integer this tick — a None
+        # ``buff_count`` (untrained / occluded badge) leaves the timer
+        # cleared so we don't false-fire on missing data.
+        town_idle_active = False
+        threshold_n = int(getattr(rec, "town_idle_threshold", 75))
+        if rec.trigger_town_idle and getattr(analysis, "buff_scanned", False) \
+                and analysis.buff_count is not None:
+            now_t = time.monotonic()
+            below = analysis.buff_count < threshold_n
+            if below:
+                if self._town_idle_started_at is None:
+                    self._town_idle_started_at = now_t
+                    logger.info(
+                        f"⏳ 마을 대기 감지 시작 — 버프 카운트={analysis.buff_count}"
+                        f" < {threshold_n}"
+                    )
+                elapsed = now_t - self._town_idle_started_at
+                threshold_s = max(1.0, float(rec.town_idle_seconds))
+                if elapsed >= threshold_s:
+                    town_idle_active = True
+                    fire_set.add("town_idle")
+                    level_active.add("town_idle")
+            else:
+                if self._town_idle_started_at is not None:
+                    held = now_t - self._town_idle_started_at
+                    logger.debug(
+                        f"⏳ 마을 대기 타이머 리셋 (유지 {held:.1f}s 후 버프 복원"
+                        f"={analysis.buff_count})"
+                    )
+                self._town_idle_started_at = None
+        else:
+            # Trigger disabled or OCR couldn't read — drop the in-flight
+            # timer so re-enabling won't fire immediately on stale state.
+            self._town_idle_started_at = None
+        # Latch release symmetric with potion/pk/hp_zero: town_idle stays
+        # latched until the buff count returns to threshold.
+        if "town_idle" not in level_active and "town_idle" in handled:
+            handled.discard("town_idle")
+
         # No global cooldown — edge-trigger latch already prevents
         # the recovery loop. Each trigger fires once until its
         # condition releases (or potion.use is re-toggled).
 
         # Decide what to fire — first un-handled active trigger wins.
         triggered_by = ""
-        for k in ("potion", "pk", "hp_zero"):
+        for k in ("potion", "pk", "hp_zero", "town_idle"):
             if k in fire_set and k not in handled:
                 triggered_by = k
                 break

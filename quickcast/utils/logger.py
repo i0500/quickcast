@@ -12,16 +12,23 @@ from loguru import logger
 def _resolve_log_dir() -> Path:
     """Pick a writable log directory.
 
-    PyInstaller --onefile extracts to a read-only `_MEIPASS` dir, so
-    `quickcast/data/logs` would silently fail to write. When frozen we
-    use `%LOCALAPPDATA%\\QuickCast\\logs`; in dev we keep the in-tree
-    path for easy access.
+    Mirrors :func:`quickcast.config.quickcast_data_dir` so logs always
+    sit next to ``userdata.json``. Both frozen and dev share the same
+    LOCALAPPDATA location — splitting them silently caused two parallel
+    userdata files to drift apart (see config.py docstring). Import
+    lazily to avoid a logger ↔ config cycle at module load.
     """
-    if getattr(sys, "frozen", False):
-        appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "QuickCast" / "logs"
-    return Path(__file__).resolve().parent.parent / "data" / "logs"
+    try:
+        from quickcast.config import quickcast_data_dir
+        return quickcast_data_dir() / "logs"
+    except Exception:
+        # Fallback used only during very-early bootstrap errors where
+        # config isn't importable yet.
+        if getattr(sys, "frozen", False):
+            appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+            if appdata:
+                return Path(appdata) / "QuickCast" / "logs"
+        return Path(__file__).resolve().parent.parent / "data" / "logs"
 
 
 _LOG_DIR = _resolve_log_dir()

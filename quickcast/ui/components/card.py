@@ -30,6 +30,16 @@ class Card(QFrame):
         self.setObjectName("card")
         v_policy = QSizePolicy.Expanding if expanding else QSizePolicy.Maximum
         self.setSizePolicy(QSizePolicy.Expanding, v_policy)
+        # Override Qt's content-based minimum width so the card can be
+        # shrunk by its container. Without this, any fixed-width child
+        # widget (e.g. Stepper, fixed-width score label, long unwrapped
+        # subtitle) forces the card — and through it the enclosing
+        # scroll area's inner widget — to be at least content-wide.
+        # That silently clipped right-side widgets on the capture tab
+        # whenever the user shrank the window. The combat section was
+        # working around this manually per-card; doing it once here
+        # makes every Card behave consistently.
+        self.setMinimumWidth(0)
 
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(16, 14, 16, 14)
@@ -68,7 +78,11 @@ class _CardHeader(QFrame):
                 h.addWidget(t)
             if subtitle:
                 s = QLabel(subtitle); s.setProperty("role", "dim")
+                # No wrap inline — sub stays a single-line muted note next
+                # to the title. If the inline mode is given a long subtitle
+                # the card author should switch to inline_subtitle=False.
                 h.addWidget(s)
+            h.addStretch(1)
         else:
             text_box = QVBoxLayout()
             text_box.setContentsMargins(0, 0, 0, 0); text_box.setSpacing(0)
@@ -78,9 +92,20 @@ class _CardHeader(QFrame):
                 text_box.addWidget(t)
             if subtitle:
                 s = QLabel(subtitle); s.setProperty("role", "dim")
+                # Word-wrap the multi-line subtitle so long help text
+                # doesn't force the card (and the whole scroll area's
+                # inner widget) wider than the viewport — that was
+                # silently clipping the right-side widgets on the
+                # capture tab whenever a verbose subtitle was set.
+                s.setWordWrap(True)
+                # Ignore horizontal width preference so QHBoxLayout can
+                # shrink us to whatever space is left.
+                s.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
                 text_box.addWidget(s)
-            h.addLayout(text_box)
-        h.addStretch(1)
+            # stretch=1 so the text block claims all leftover width
+            # (no extra addStretch — actions sit on the right at their
+            # natural sizes).
+            h.addLayout(text_box, stretch=1)
         for w in actions:
             h.addWidget(w)
 

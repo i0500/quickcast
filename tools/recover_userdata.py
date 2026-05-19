@@ -59,7 +59,7 @@ data = {
   "alarm_repeat_minutes": 0,
   "alarm_sound": "off",
   "alarm_sound_volume": 80,
-  "capture_fps": 20,
+  "capture_fps": 10,
   "theme": "graphite",
   "game_window_patterns": ["리니지W", "Lineage W", "LINEAGE", "퍼플", "PURPLE"],
   "capture_window_title": "리니지 리마스터 - Lineage Remaster - Chrome",

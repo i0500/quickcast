@@ -12,21 +12,35 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
-def _resolve_config_path() -> Path:
-    """Pick a writable path for `userdata.json`.
 
-    PyInstaller --onefile extracts the bundle into a temp directory that
-    is read-only at runtime, so writing back to `quickcast/data/...`
-    silently fails (or worse, is wiped on next launch). When frozen we
-    use `%LOCALAPPDATA%\\QuickCast\\userdata.json`; in development we
-    keep the in-tree path so the dev loop is convenient.
+
+def quickcast_data_dir() -> Path:
+    """Single source-of-truth for QuickCast's runtime data directory.
+
+    Resolution order:
+      1. ``$QUICKCAST_DATA_DIR`` if set (lets devs point at any folder).
+      2. ``%LOCALAPPDATA%\\QuickCast`` on Windows — frozen *and* dev mode
+         both use this so the userdata/logs/digit-templates stay in one
+         place regardless of how the app was launched. Previously dev
+         used the in-tree ``quickcast/data`` and frozen used LOCALAPPDATA,
+         and the two would silently drift apart whenever the user ran
+         both (e.g. calibrate via source, then run the exe and see "old"
+         numbers — see the userdata-path-split incident).
+      3. Fallback to the in-tree ``quickcast/data`` for non-Windows /
+         no-LOCALAPPDATA edge cases.
     """
-    import os, sys
-    if getattr(sys, "frozen", False):
-        appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "QuickCast" / "userdata.json"
-    return DATA_DIR / "userdata.json"
+    import os
+    env = os.environ.get("QUICKCAST_DATA_DIR")
+    if env:
+        return Path(env)
+    appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / "QuickCast"
+    return DATA_DIR
+
+
+def _resolve_config_path() -> Path:
+    return quickcast_data_dir() / "userdata.json"
 
 
 CONFIG_PATH = _resolve_config_path()
@@ -71,6 +85,11 @@ class RoiProfile(BaseModel):
     potion_cap: Point = Field(default_factory=lambda: Point(x=483, y=629))
     potion_cap_w: int = 41
     potion_cap_h: int = 40
+    # Buff-count badge (top-left "75" circle). Used by the town-idle
+    # recovery trigger — see BuffCounter / RecoverySettings.trigger_town_idle.
+    buff_cap: Point = Field(default_factory=lambda: Point(x=4, y=63))
+    buff_cap_w: int = 38
+    buff_cap_h: int = 33
 
 
 # Coarse aspect-ratio buckets used to key ROI profiles. The frame is
@@ -109,6 +128,12 @@ ROI_DEFAULTS: dict[str, tuple[int, int, int, int]] = {
     "hp_text":     (60,   18, 200, 18),
     "mp_text":     (60,   40, 200, 18),
     "potion_text": (560,  600, 64, 28),
+    # Top-left "75" buff-count badge — derived from a 1911×1105 sample
+    # (badge at native (13,104) size 42×35) scaled to 1280×720.
+    "buff":        (4,    63,  38, 33),
+    # OCR text region for the buff badge — tighter rectangle inside the
+    # badge that hugs the digits. Tuned against the same 1911×1105 sample.
+    "buff_text":   (8,    66,  28, 24),
 }
 
 
@@ -166,6 +191,29 @@ class PotionSlot(BaseModel):
     # potion. 150_000 ≈ 60% NORMED — calibrated against the real game
     # icon at 1280×720 client resolution.
     threshold: int = 150_000
+
+
+class BuffCounter(BaseModel):
+    """Top-left buff-count badge — reads the number via digit OCR.
+
+    Previous implementation template-matched a "75" snapshot. That broke
+    the moment the count read anything else (74, 73, 0…) and the
+    low-contrast circular badge produced noisy match scores. The OCR
+    path reuses the digit-template pipeline (see core/ocr.py and the
+    'buff' domain in digit_store) — the user trains 0..9 once and we
+    read the actual integer count every frame.
+
+    ``cap`` here is the *legacy template* ROI kept for backward-compat
+    with userdata.json files written by older builds; new code paths
+    read ``Settings.buff_text_cap`` instead.
+    """
+    enabled: bool = False
+    cap: Point = Field(default_factory=lambda: Point(x=4, y=63))
+    cap_w: int = 38
+    cap_h: int = 33
+    # Legacy template-match threshold — unused by the OCR path but kept
+    # so older userdata files don't drop the field on round-trip save.
+    threshold: int = 2_500_000
 
 
 class OverlayClose(BaseModel):
@@ -255,6 +303,17 @@ class RecoverySettings(BaseModel):
     trigger_potion: bool = True
     trigger_pk: bool = False
     trigger_hp_zero: bool = False
+    # When True, fires recovery if the buff-count badge stays below
+    # ``town_idle_threshold`` continuously for ``town_idle_seconds``.
+    # Catches the "expired hunting ground → standing in town" state
+    # the potion/PK/HP triggers don't cover. Requires Settings.buff.enabled
+    # so the recognizer scans the badge each frame, AND a configured
+    # Settings.buff_text_cap so OCR has something to read.
+    trigger_town_idle: bool = False
+    town_idle_seconds: int = 300
+    # OCR-read buff count below this value counts as "in town". 75 mirrors
+    # the user-provided sample where a full hunting buff stack shows 75.
+    town_idle_threshold: int = 75
     # Slot IDs whose firing also kicks off the recovery sequence. Lets
     # the user wire any slot (e.g. a manually-cast town-return skill, or
     # a specific death-recovery hotkey) into the recovery flow.
@@ -307,6 +366,13 @@ class Settings(BaseModel):
     potion_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
     potion_text_cap_w: int = 0
     potion_text_cap_h: int = 0
+    # Buff-count badge ("75" circle) text ROI. Scanned via digit OCR
+    # when BuffCounter.enabled is True; replaces the earlier template-
+    # match approach which couldn't tell 75 from 73 from 0. Default 0×0
+    # so the user must explicitly draw / pick it like the other text ROIs.
+    buff_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    buff_text_cap_w: int = 0
+    buff_text_cap_h: int = 0
     # When True, recognition.py reads from the *_text_cap ROIs via the
     # learned digit OCR. False ⇒ legacy detectors. UI toggles this; the
     # individual *_text_cap fields are still kept so the user can train
@@ -323,6 +389,9 @@ class Settings(BaseModel):
     slots: dict[str, Slot] = Field(default_factory=dict)
     pk: PkSlot = Field(default_factory=PkSlot)
     potion: PotionSlot = Field(default_factory=PotionSlot)
+    # Top-left buff-count badge — recognized only when enabled. Drives
+    # the town-idle recovery trigger (see RecoverySettings).
+    buff: "BuffCounter" = Field(default_factory=lambda: BuffCounter())
 
     # Alarms
     alarms: list[Alarm] = Field(default_factory=list)
@@ -358,6 +427,13 @@ class Settings(BaseModel):
     # bucket, then user can fine-tune per ratio).
     roi_profiles: dict[str, RoiProfile] = Field(default_factory=dict)
     active_aspect: str = ""
+    # Lock ROI profile to active_aspect regardless of detected source
+    # aspect. Default True after the 2026-05-19 "ROI size differs in
+    # fullscreen" report — combined with letterbox normalisation in
+    # core/capture.py, a single set of ROIs now works across fullscreen
+    # / windowed / different monitor aspect ratios. Set to False to
+    # re-enable the legacy per-aspect-profile auto-swap.
+    lock_aspect_profile: bool = True
 
     # Town-return recovery sequence — clicks a preset list of points to
     # navigate back to hunting after a forced return event.
@@ -379,6 +455,14 @@ class Settings(BaseModel):
             # item_acquired: 보상 상자 위치/크기/임계값이 펫호루라기와 미세하게
             # 달라 별도 캘리브레이션 적용.
             "item_acquired": OverlayClose(
+                cap=Point(x=594, y=94),
+                cap_w=85,
+                cap_h=77,
+                threshold=3_500_000,
+            ),
+            # blood_pledge: 혈맹축복 활성화 안내 팝업도 슬롯 입력을 막으므로
+            # item_acquired 와 동일한 위치/크기/임계값으로 ESC 자동 닫기.
+            "blood_pledge": OverlayClose(
                 cap=Point(x=594, y=94),
                 cap_w=85,
                 cap_h=77,
@@ -439,6 +523,12 @@ class Settings(BaseModel):
         elif kind == "potion_text":
             self.potion_text_cap = Point(x=x, y=y)
             self.potion_text_cap_w, self.potion_text_cap_h = w, h
+        elif kind == "buff":
+            self.buff.cap = Point(x=x, y=y)
+            self.buff.cap_w, self.buff.cap_h = w, h
+        elif kind == "buff_text":
+            self.buff_text_cap = Point(x=x, y=y)
+            self.buff_text_cap_w, self.buff_text_cap_h = w, h
         else:
             return False
         return True
@@ -455,6 +545,8 @@ class Settings(BaseModel):
             pk_cap_w=self.pk.cap_w, pk_cap_h=self.pk.cap_h,
             potion_cap=Point(x=self.potion.cap.x, y=self.potion.cap.y),
             potion_cap_w=self.potion.cap_w, potion_cap_h=self.potion.cap_h,
+            buff_cap=Point(x=self.buff.cap.x, y=self.buff.cap.y),
+            buff_cap_w=self.buff.cap_w, buff_cap_h=self.buff.cap_h,
         )
 
     def _apply_profile(self, p: RoiProfile) -> None:
@@ -467,6 +559,8 @@ class Settings(BaseModel):
         self.pk.cap_w, self.pk.cap_h = int(p.pk_cap_w), int(p.pk_cap_h)
         self.potion.cap = Point(x=p.potion_cap.x, y=p.potion_cap.y)
         self.potion.cap_w, self.potion.cap_h = int(p.potion_cap_w), int(p.potion_cap_h)
+        self.buff.cap = Point(x=p.buff_cap.x, y=p.buff_cap.y)
+        self.buff.cap_w, self.buff.cap_h = int(p.buff_cap_w), int(p.buff_cap_h)
 
     @staticmethod
     def _scale_profile_y(p: RoiProfile, scale: float) -> RoiProfile:
@@ -494,11 +588,13 @@ class Settings(BaseModel):
             hp_cap_w=p.hp_cap_w, hp_cap_h=sh(p.hp_cap_h),
             mp_cap=Point(x=p.mp_cap.x, y=sy(p.mp_cap.y)),
             mp_cap_w=p.mp_cap_w, mp_cap_h=sh(p.mp_cap_h),
-            # PK / POTION pass through unchanged — see docstring above.
+            # PK / POTION / BUFF pass through unchanged — see docstring above.
             pk_cap=Point(x=p.pk_cap.x, y=p.pk_cap.y),
             pk_cap_w=p.pk_cap_w, pk_cap_h=p.pk_cap_h,
             potion_cap=Point(x=p.potion_cap.x, y=p.potion_cap.y),
             potion_cap_w=p.potion_cap_w, potion_cap_h=p.potion_cap_h,
+            buff_cap=Point(x=p.buff_cap.x, y=p.buff_cap.y),
+            buff_cap_w=p.buff_cap_w, buff_cap_h=p.buff_cap_h,
         )
 
     def sync_aspect(self, aspect: str) -> tuple[bool, bool]:
@@ -694,7 +790,8 @@ def _default_slots() -> dict[str, Slot]:
 
 
 __all__ = [
-    "Range", "Point", "Slot", "PkSlot", "PotionSlot", "ItemCloseSettings",
-    "OverlayClose", "RoiProfile", "ASPECT_BUCKETS", "ROI_DEFAULTS",
-    "classify_aspect", "Alarm", "Settings", "CONFIG_PATH", "DATA_DIR",
+    "Range", "Point", "Slot", "PkSlot", "PotionSlot", "BuffCounter",
+    "ItemCloseSettings", "OverlayClose", "RoiProfile",
+    "ASPECT_BUCKETS", "ROI_DEFAULTS", "classify_aspect", "Alarm",
+    "Settings", "CONFIG_PATH", "DATA_DIR",
 ]

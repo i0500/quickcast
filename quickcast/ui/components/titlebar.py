@@ -100,7 +100,25 @@ class TitleBar(QFrame):
         if self._drag_origin is None or self.window() is None:
             return
         delta = e.globalPosition().toPoint() - self._drag_origin
-        self.window().move(self._win_origin + delta)
+        win = self.window()
+        # Dragging a maximized window used to call `win.move()` directly,
+        # which silently broke the maximized-state bookkeeping and left
+        # the restore-to-normal geometry stale — the user then couldn't
+        # un-maximize back to the previous "작은 사이즈". Conventional
+        # behaviour: restore normal, place the window under the cursor,
+        # then continue dragging.
+        if win.isMaximized():
+            cursor_global = e.globalPosition().toPoint()
+            win.showNormal()
+            # After showNormal the window is at its previous normal
+            # geometry. Re-anchor so the cursor stays on the title bar.
+            nw = win.width()
+            self._win_origin = QPoint(cursor_global.x() - nw // 2, 0)
+            self._drag_origin = cursor_global
+            win.move(self._win_origin)
+            e.accept()
+            return
+        win.move(self._win_origin + delta)
         e.accept()
 
     def mouseReleaseEvent(self, e: QMouseEvent) -> None:

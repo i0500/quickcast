@@ -206,9 +206,19 @@ def make_recovery_card() -> QWidget:
     enable_row.addWidget(trig_lbl)
     cb1 = _bind_check(rec, "trigger_potion",  "물약 부족")
     cb2 = _bind_check(rec, "trigger_pk",      "PK 감지")
+    # 마을 대기 트리거(rec.trigger_town_idle) + 버프 OCR(buff.enabled) + 임계값/
+    # 지속 시간/학습은 모두 캡처 탭의 ‘버프 카운트 OCR — 마을 대기 인식’
+    # 카드에서만 설정한다. 여기서 중복 노출하면 둘 중 어느 한쪽 변경이
+    # 다른 쪽 위젯에 즉시 반영되지 않아(스테퍼는 자체 값을 들고 있음)
+    # ‘연동 안 됨’ 버그가 났던 이력 → 단일 진실 원천으로 통합.
     enable_row.addWidget(cb1); enable_row.addWidget(cb2)
     enable_row.addStretch(1)
     head_card.add(enable_row)
+
+    # 마을 대기 임계값/지속 시간/실시간 OCR값/학습 버튼 — 모두 캡처 탭의
+    # ‘버프 카운트 OCR — 마을 대기 인식’ 카드에서 단일 관리. 여기서는
+    # 중복 노출하지 않습니다(과거에는 둘 중 한 스테퍼만 갱신되어 ‘연동
+    # 안 됨’으로 보이는 문제가 있었음).
 
     # ── Slot trigger row — label + slot buttons on one compact row ──
     # HP 0% (death) trigger removed: death recovery has different

@@ -105,9 +105,26 @@ class AppShell(QMainWindow):
 
     # ───────── window ops ─────────
     def _toggle_max(self) -> None:
+        """Toggle between maximized and the last-known normal geometry.
+
+        Plain showNormal() relies on Qt's internal "previous geometry"
+        which gets stomped any time the user drags or resizes the
+        maximized window. We snapshot the normal geometry explicitly
+        before maximizing and restore it on un-maximize so the small
+        window size doesn't go missing — the "작은 사이즈로 안 들어옴"
+        report from a maximize-then-drag-then-restore cycle.
+        """
         if self.isMaximized():
+            saved = getattr(self, "_normal_geometry", None)
             self.showNormal()
+            if saved is not None and saved.isValid() and saved.width() > 200:
+                self.setGeometry(saved)
         else:
+            # Cache the current geometry only when it's a real "normal"
+            # state — never the maximized rect itself (Qt sometimes
+            # reports isMaximized=False mid-transition).
+            if not self.isMaximized() and not self.isFullScreen():
+                self._normal_geometry = self.geometry()
             self.showMaximized()
 
     # ───────── master mirror ─────────

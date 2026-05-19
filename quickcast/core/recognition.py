@@ -59,6 +59,16 @@ class FrameAnalysis:
     # Per-overlay detection results (pet_whistle, item_acquired, …).
     # Empty when no overlay is enabled or templates aren't loaded.
     overlay_matches: dict = field(default_factory=dict)
+    # Buff-count badge state — populated via digit OCR when
+    # Settings.buff.enabled AND a non-zero buff_text_cap are configured.
+    # ``buff_count`` is the OCR-read integer (None when OCR couldn't
+    # confidently read a number). ``buff_scanned`` distinguishes "feature
+    # off / template untrained" (False) from "scanned this frame" (True);
+    # the town-idle trigger only acts on a successful scan.
+    buff_count: Optional[int] = None
+    buff_confidence: float = 0.0
+    buff_text: str = ""
+    buff_scanned: bool = False
 
 
 def _hp_ratio(roi_bgra: np.ndarray) -> int:
@@ -197,11 +207,22 @@ _TS_DIAG = {"last": 0.0}    # throttled raw-score logger
 _ROI_FIX_REPORTED: dict[str, bool] = {}    # log ROI auto-fix once per kind
 
 
-# Multi-scale candidates around 1.0× — covers the small zoom variation
-# that comes from non-uniform stretching (16:9 → 16:10 normalisation,
-# user-resized window, etc.). 5 scales × ~30µs each = under 1ms total
-# for the 13×13 potion template, ~4ms for the 25×25 pk template.
+# Multi-scale candidates around 1.0× — 5 단계 ±18% 팬으로 복원.
+# lock_aspect_profile + letterboxing 으로 16:9↔16:10 같은 큰 스트레치는
+# 사라졌지만, 사용자 측 DPI 스케일링/창모드 미세 차이 때문에 ±8%로는
+# 작은 아이콘(물약 13×13)이 누락되는 사례가 보고됨 → 다시 넓게.
+# 13×13 템플릿 기준 5-scale 매칭 비용은 한 프레임당 1ms 미만이라
+# CPU 부담은 무시 가능.
 _SCALE_CANDIDATES: tuple[float, ...] = (0.85, 0.93, 1.00, 1.08, 1.18)
+
+
+# Throttled "near-miss" diagnostic — when a slot is enabled but no
+# detection (score < threshold) we log raw scoring data once per N
+# seconds per kind so the user can see what the recognizer actually
+# saw without drowning the log card. Key is the kind string ("pk" /
+# "potion" / "overlay:xxx"); value is monotonic timestamp of last log.
+_NEAR_MISS_DIAG: dict[str, float] = {}
+_NEAR_MISS_INTERVAL = 3.0    # seconds between logs per kind
 
 
 def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
@@ -218,6 +239,18 @@ def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
         Set to ``(-1, -1)`` on failure / unmatchable input.
       - ``best_scale`` is the template scale factor that gave the best
         score (1.0 = native template size). Useful for diagnostics.
+
+    Matching strategy (per-scale):
+      1. BGR (color) 채널만 비교 — alpha=255 일정인 템플릿(pk/potion/buff
+         계열)에서 alpha 채널이 매칭 점수에 0만 기여하면서도 4채널 입력은
+         OpenCV 내부에서 4번째 분산 0 채널을 처리하느라 정밀도가 떨어질
+         수 있음. BGR 3채널로 명시 변환해 깨끗한 신호만 사용.
+      2. 알파가 실제로 변동(투명도 그라데이션)하는 템플릿(예: pet_whistle)
+         은 alpha 를 mask 로 전달해 투명 영역을 매칭에서 제외.
+      3. Grayscale 매칭을 병행하고 색상/회색 중 큰 점수를 채택. 디스플레이
+         감마/모니터 캘리브레이션 차이로 BGR NORMED 점수가 떨어지는
+         사례를 잡기 위함. 동일 색계열의 다른 모양에 대한 오탐 위험은
+         형태 자체가 충분히 변별적인 PK 경보/물약 ! 아이콘에서 무시 가능.
 
     Tries multiple template scales around 1.0× so a HUD that shrunk /
     grew slightly under a different client size still locks on. The ROI
@@ -245,6 +278,37 @@ def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
         )
         return 0.0, (-1, -1), 1.0
 
+    # ── Channel preparation (once per call, not per scale) ──
+    # Templates are loaded as BGRA via _load_bgra. Split into BGR and
+    # alpha; use alpha as mask only if it actually varies. ROI from
+    # frame.crop is BGRA too (mss/PrintWindow output).
+    if target_bgra.ndim == 3 and target_bgra.shape[2] == 4:
+        target_bgr = target_bgra[:, :, :3]
+        target_alpha = target_bgra[:, :, 3]
+        # >1 unique value ⇒ real transparency, use as mask. 단일 값(255)
+        # 이면 mask 효과 0 → 비용만 늘어나므로 skip.
+        _use_mask = int(np.unique(target_alpha).size) > 1
+    else:
+        target_bgr = target_bgra if target_bgra.ndim == 3 else cv2.cvtColor(
+            target_bgra, cv2.COLOR_GRAY2BGR
+        )
+        target_alpha = None
+        _use_mask = False
+
+    if roi_bgra.ndim == 3 and roi_bgra.shape[2] == 4:
+        roi_bgr = roi_bgra[:, :, :3]
+    elif roi_bgra.ndim == 3:
+        roi_bgr = roi_bgra
+    else:
+        roi_bgr = cv2.cvtColor(roi_bgra, cv2.COLOR_GRAY2BGR)
+
+    # Ensure contiguous (matchTemplate is picky about strided views).
+    roi_bgr = np.ascontiguousarray(roi_bgr)
+    target_bgr = np.ascontiguousarray(target_bgr)
+
+    roi_gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    target_gray_native = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2GRAY)
+
     best_score = -1.0
     best_xy = (-1, -1)
     best_scale = 1.0
@@ -253,16 +317,44 @@ def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
         sh = max(1, int(round(th_native * s)))
         if sw > rw or sh > rh:
             continue
+        # INTER_AREA for shrink, INTER_LINEAR for upscale — cleanest
+        # result for small UI icons.
+        interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR
         if sw == tw_native and sh == th_native:
-            tmpl = target_bgra
+            tmpl_bgr = target_bgr
+            tmpl_gray = target_gray_native
+            tmpl_mask = target_alpha
         else:
-            # INTER_AREA for shrink, INTER_LINEAR for upscale — gives the
-            # cleanest result for the small UI icons we're matching.
-            interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR
-            tmpl = cv2.resize(target_bgra, (sw, sh), interpolation=interp)
+            tmpl_bgr = cv2.resize(target_bgr, (sw, sh), interpolation=interp)
+            tmpl_gray = cv2.resize(target_gray_native, (sw, sh), interpolation=interp)
+            tmpl_mask = (
+                cv2.resize(target_alpha, (sw, sh), interpolation=interp)
+                if target_alpha is not None else None
+            )
         try:
-            result = cv2.matchTemplate(roi_bgra, tmpl, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            if _use_mask and tmpl_mask is not None:
+                result_bgr = cv2.matchTemplate(
+                    roi_bgr, tmpl_bgr, cv2.TM_CCOEFF_NORMED, mask=tmpl_mask
+                )
+                result_gray = cv2.matchTemplate(
+                    roi_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED, mask=tmpl_mask
+                )
+            else:
+                result_bgr = cv2.matchTemplate(roi_bgr, tmpl_bgr, cv2.TM_CCOEFF_NORMED)
+                result_gray = cv2.matchTemplate(roi_gray, tmpl_gray, cv2.TM_CCOEFF_NORMED)
+            # mask 경로에서 NaN/-inf 가 나올 수 있음 → 안전하게 클립.
+            np.nan_to_num(result_bgr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            np.nan_to_num(result_gray, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            _, max_bgr, _, loc_bgr = cv2.minMaxLoc(result_bgr)
+            _, max_gray, _, loc_gray = cv2.minMaxLoc(result_gray)
+            # Take whichever (color/gray) scored higher. Gray catches
+            # the cases where display gamma / color profile knocked the
+            # color CCOEFF down; color keeps the discrimination edge for
+            # well-saturated icons (PK red / 물약 ! orange).
+            if max_bgr >= max_gray:
+                max_val, max_loc = max_bgr, loc_bgr
+            else:
+                max_val, max_loc = max_gray, loc_gray
         except cv2.error as exc:
             logger.error(f"❌ 인식 실패 [{_kind} @ {s:.2f}×]: {exc}")
             continue
@@ -285,6 +377,40 @@ def _template_score(roi_bgra: np.ndarray, target_bgra: np.ndarray,
     return s
 
 
+def _maybe_log_near_miss(kind: str, score: float, threshold: int,
+                           local_xy: tuple[int, int], scale: float) -> None:
+    """Throttled diagnostic when score < threshold for an enabled slot.
+
+    Helps the user calibrate by exposing the *actual* score the matcher
+    is computing for PK / potion when they're enabled. Only logs when
+    the score is in the "near miss" band (10%~99% of threshold) — true
+    zero scores (slot OFF / template missing) and clean hits are skipped
+    to avoid log spam. Throttled per kind so a 10 fps capture loop
+    doesn't drown the dashboard log card.
+    """
+    if threshold <= 0 or score >= threshold:
+        return
+    floor = threshold * 0.10
+    if score < floor:
+        return
+    import time as _t
+    now = _t.monotonic()
+    last = _NEAR_MISS_DIAG.get(kind, 0.0)
+    if now - last < _NEAR_MISS_INTERVAL:
+        return
+    _NEAR_MISS_DIAG[kind] = now
+    try:
+        from quickcast.utils.logger import logger
+        pct = 100.0 * float(score) / float(threshold)
+        logger.info(
+            f"🎯 {kind} 인식 근접 — score={int(score):,} / 임계={threshold:,} "
+            f"({pct:.0f}%), best xy={local_xy}, scale={scale:.2f}× — "
+            f"임계값을 낮추거나 ROI/템플릿 재보정 검토"
+        )
+    except Exception:
+        pass
+
+
 class Recognizer:
     """Holds preloaded template images, exposes one-shot frame analysis."""
 
@@ -292,18 +418,23 @@ class Recognizer:
         self,
         pk_target_path: Path = TARGETS_DIR / "pk.png",
         potion_target_path: Path = TARGETS_DIR / "potion.png",
+        buff_target_path: Path = TARGETS_DIR / "buff_full.png",
     ) -> None:
         self._pk_target = self._load_bgra(pk_target_path)
         self._potion_target = self._load_bgra(potion_target_path)
+        # Top-left buff-count badge ("75" circle) template. None when
+        # the file isn't shipped — settings.buff.enabled gracefully
+        # no-ops in that case.
+        self._buff_target = self._load_bgra(buff_target_path)
         # Overlay templates — keyed by overlay id (matches the keys in
         # settings.overlay_closes). Any file under data/targets/ whose
-        # stem is not pk/potion is treated as an overlay template; the
-        # user can drop a new png and a matching settings entry to
-        # extend without code changes.
+        # stem is not pk/potion/buff_full is treated as an overlay
+        # template; the user can drop a new png and a matching settings
+        # entry to extend without code changes.
         self._overlay_targets: dict[str, np.ndarray] = {}
         for p in sorted(TARGETS_DIR.glob("*.png")):
             stem = p.stem.lower()
-            if stem in ("pk", "potion"):
+            if stem in ("pk", "potion", "buff_full"):
                 continue
             img = self._load_bgra(p)
             if img is not None:
@@ -312,29 +443,57 @@ class Recognizer:
         # Single concise init line — only warn when a template is missing.
         pk_ok = self._pk_target is not None
         po_ok = self._potion_target is not None
+        bu_ok = self._buff_target is not None
         if not pk_ok or not po_ok:
             logger.warning(
                 f"⚠️ 템플릿 로드 실패 — PK: {'OK' if pk_ok else 'FAIL'},"
                 f" 물약: {'OK' if po_ok else 'FAIL'}"
             )
+        if not bu_ok:
+            logger.info("ℹ️ 버프 카운트 템플릿(buff_full.png) 없음 — 마을 대기 트리거 비활성")
         if self._overlay_targets:
-            logger.info(
-                f"🎯 오버레이 템플릿 로드: {', '.join(self._overlay_targets)}"
+            # Demoted from INFO → DEBUG: load message fired twice on
+            # startup (recognizer + dashboard re-import) and added zero
+            # debug value compared to its log-spam cost. Kept at DEBUG
+            # for when the dev needs to confirm templates loaded.
+            logger.debug(
+                f"overlay templates loaded: {', '.join(self._overlay_targets)}"
             )
         self._last_score_log_at = 0.0
         # Throttle the per-frame potion-OCR debug log to once per ~2s
         # so a 10 fps capture loop doesn't drown the log card.
         self._last_potion_dbg_at = 0.0
+        # Rolling history of (value, confidence) pairs for buff-count
+        # OCR. Smooths per-frame jitter while still letting a stronger
+        # signal override an earlier weak one — see the analyze() block
+        # for the confidence-weighted voting rule.
+        self._buff_history: list[tuple[int, float]] = []
+        self._buff_smoothed: Optional[int] = None
+        # Window of frames considered for the vote. At ~10 fps this
+        # is ~1 second of jitter rejection without lagging real changes.
+        self._buff_window: int = 10
+        # Minimum *summed confidence* for the leading candidate to be
+        # accepted. ≈ 2 high-confidence reads (conf 1.0 each) OR 4
+        # medium reads (conf 0.5 each). Prevents one stray glyph match
+        # from latching the smoother on its first read.
+        self._buff_min_score: float = 1.5
         # Per-domain digit templates + canonical sizes.
-        # Structure: { "hp": {"0": [mask, …], …}, "mp": {...}, "potion": {...} }
+        # Structure: { "hp": {"0": [mask, …], …}, "mp": {...}, "potion": {...}, "buff": {...} }
         # A "legacy" entry holds the pre-domain global pool (digits/*.png) so
         # users who trained before the split keep working until they
         # re-train per domain.
         self._digit_templates: dict[str, dict[str, list[np.ndarray]]] = {
-            "hp": {}, "mp": {}, "potion": {}, "legacy": {},
+            "hp": {}, "mp": {}, "potion": {}, "buff": {}, "legacy": {},
         }
         self._digit_canonical: dict[str, Optional[tuple[int, int]]] = {
-            "hp": None, "mp": None, "potion": None, "legacy": None,
+            "hp": None, "mp": None, "potion": None, "buff": None, "legacy": None,
+        }
+        # Per-domain binarisation threshold from digit_store.read_threshold.
+        # None means "auto-percentile" — the threshold the legacy global
+        # Settings.ocr_threshold falls back to when no per-domain value
+        # has been written yet.
+        self._digit_threshold: dict[str, Optional[int]] = {
+            "hp": None, "mp": None, "potion": None, "buff": None, "legacy": None,
         }
         self.reload_digits()
 
@@ -343,23 +502,30 @@ class Recognizer:
 
         Loads each domain's pool plus the legacy global pool, and pulls
         each domain's canonical (W, H) for the per-domain normalised
-        matchTemplate path in ocr._score_against.
+        matchTemplate path in ocr._score_against. Also caches each
+        domain's learned binarisation threshold so inference uses the
+        exact value the templates were trained at (per-domain, not the
+        global Settings.ocr_threshold which got overwritten every time
+        the user retrained a different domain).
         """
         try:
             from quickcast.core.digit_store import (
-                load_templates, read_canonical,
+                load_templates, read_canonical, read_threshold,
             )
-            for d in ("hp", "mp", "potion"):
+            for d in ("hp", "mp", "potion", "buff"):
                 self._digit_templates[d] = load_templates(domain=d)
                 self._digit_canonical[d] = read_canonical(domain=d)
+                self._digit_threshold[d] = read_threshold(domain=d)
             self._digit_templates["legacy"] = load_templates(domain=None)
             self._digit_canonical["legacy"] = None
+            self._digit_threshold["legacy"] = None
         except Exception:
             from quickcast.utils.logger import logger
             logger.exception("digit templates reload failed")
             for d in self._digit_templates:
                 self._digit_templates[d] = {}
                 self._digit_canonical[d] = None
+                self._digit_threshold[d] = None
 
     def _templates_for(self, domain: str) -> tuple[
         dict[str, list[np.ndarray]], Optional[tuple[int, int]]
@@ -445,15 +611,21 @@ class Recognizer:
         # OCR active when the mode is on AND at least one domain (or
         # the legacy pool) has any trained templates.
         ocr_active = bool(getattr(settings, "ocr_mode", False)) and any(
-            self._digit_templates.get(d) for d in ("hp", "mp", "potion", "legacy")
+            self._digit_templates.get(d) for d in ("hp", "mp", "potion", "buff", "legacy")
         )
         if ocr_active:
             from quickcast.core.ocr import recognise, hp_percentage
-            # Use the same threshold the user learned with — 0 means
-            # "auto percentile" (ocr.py default), anything else is the
-            # exact slider value they saved in the calibration dialog.
-            ocr_thr_raw = int(getattr(settings, "ocr_threshold", 0) or 0)
-            ocr_thr = ocr_thr_raw if ocr_thr_raw > 0 else None
+            # Per-domain learned threshold (from digit_store .threshold
+            # file) wins over the legacy global Settings.ocr_threshold
+            # fallback. Both feed the same recognise() threshold arg —
+            # None at the end of the chain means "auto-percentile".
+            global_thr_raw = int(getattr(settings, "ocr_threshold", 0) or 0)
+            global_thr: Optional[int] = (
+                global_thr_raw if global_thr_raw > 0 else None
+            )
+            def _thr_for(dom: str) -> Optional[int]:
+                v = self._digit_threshold.get(dom)
+                return v if v is not None else global_thr
             # HP
             if settings.hp_text_cap_w > 0 and settings.hp_text_cap_h > 0:
                 tpl, canon = self._templates_for("hp")
@@ -462,7 +634,7 @@ class Recognizer:
                         settings.hp_text_cap,
                         settings.hp_text_cap_w, settings.hp_text_cap_h,
                     )
-                    r = recognise(hp_text_roi, tpl, threshold=ocr_thr,
+                    r = recognise(hp_text_roi, tpl, threshold=_thr_for("hp"),
                                     canonical=canon)
                     ocr_hp = hp_percentage(r)
             # MP
@@ -473,7 +645,7 @@ class Recognizer:
                         settings.mp_text_cap,
                         settings.mp_text_cap_w, settings.mp_text_cap_h,
                     )
-                    r = recognise(mp_text_roi, tpl, threshold=ocr_thr,
+                    r = recognise(mp_text_roi, tpl, threshold=_thr_for("mp"),
                                     canonical=canon)
                     ocr_mp = hp_percentage(r)
             # Potion — single-number field; 0 == empty.
@@ -489,7 +661,7 @@ class Recognizer:
                         settings.potion_text_cap,
                         settings.potion_text_cap_w, settings.potion_text_cap_h,
                     )
-                    r = recognise(po_text_roi, tpl_po, threshold=ocr_thr,
+                    r = recognise(po_text_roi, tpl_po, threshold=_thr_for("potion"),
                                     canonical=canon_po)
             else:
                 r = None
@@ -555,6 +727,10 @@ class Recognizer:
             if local_xy != (-1, -1):
                 pk_match_xy = (settings.pk.cap.x + local_xy[0],
                                settings.pk.cap.y + local_xy[1])
+            _maybe_log_near_miss(
+                "pk", pk_score, int(settings.pk.threshold),
+                local_xy, pk_match_scale,
+            )
         else:
             pk_score = 0.0
 
@@ -569,8 +745,112 @@ class Recognizer:
             if local_xy != (-1, -1):
                 potion_match_xy = (settings.potion.cap.x + local_xy[0],
                                     settings.potion.cap.y + local_xy[1])
+            _maybe_log_near_miss(
+                "potion", potion_score, int(settings.potion.threshold),
+                local_xy, potion_match_scale,
+            )
         else:
             potion_score = 0.0
+
+        # ── Buff-count badge (top-left "75") via digit OCR ───────────
+        # Replaces the earlier template-match path. Reads the actual
+        # integer count using the per-domain digit templates (trained
+        # by the user via the OCR calibration dialog). Per-frame raw
+        # reads pass through a majority-vote smoother below so the
+        # exposed ``buff_count`` doesn't flicker between adjacent
+        # values when the user's game UI hasn't actually changed.
+        buff_cfg = getattr(settings, "buff", None)
+        buff_count: Optional[int] = None
+        buff_confidence: float = 0.0
+        buff_text: str = ""
+        buff_scanned = False
+        # Reset smoother when feature is off so re-enabling starts fresh.
+        if buff_cfg is None or not bool(getattr(buff_cfg, "enabled", False)):
+            if self._buff_history:
+                self._buff_history.clear()
+                self._buff_smoothed = None
+        if buff_cfg is not None and bool(getattr(buff_cfg, "enabled", False)) \
+                and settings.buff_text_cap_w > 0 and settings.buff_text_cap_h > 0:
+            tpl, canon = self._templates_for("buff")
+            if tpl:
+                from quickcast.core.ocr import recognise
+                # Per-domain learned threshold wins over the legacy global
+                # Settings.ocr_threshold so retraining HP/MP doesn't break
+                # buff (and vice-versa). None at the chain end ⇒ auto.
+                buff_thr = self._digit_threshold.get("buff")
+                if buff_thr is None:
+                    g = int(getattr(settings, "ocr_threshold", 0) or 0)
+                    buff_thr = g if g > 0 else None
+                buff_roi = frame.crop(
+                    settings.buff_text_cap,
+                    settings.buff_text_cap_w, settings.buff_text_cap_h,
+                )
+                # ── 2× upsample before OCR ──
+                # The buff badge is small (≈28×24 in the normalised frame)
+                # and the digits sit on a noisy circular background. At
+                # native size anti-aliasing collapses glyph edges into
+                # the border which breaks connected-components
+                # segmentation; INTER_CUBIC upscale to 2× smooths the
+                # interpolated edges so segment_glyphs gets cleaner
+                # boundaries to work with. The canonical-size normaliser
+                # downstream renders this scale-invariant for the actual
+                # template match.
+                if buff_roi.size > 0:
+                    bh, bw = buff_roi.shape[:2]
+                    buff_roi = cv2.resize(
+                        buff_roi, (bw * 2, bh * 2),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+                r = recognise(buff_roi, tpl, threshold=buff_thr, canonical=canon)
+                buff_scanned = True
+                buff_text = r.text
+                buff_confidence = float(r.confidence)
+                raw: Optional[int] = None
+                # Buff count is always ≥ 2 digits in Lineage W (the
+                # badge tops out around 75 and even an empty hunting
+                # buff stack shows "10"-ish during transient frames).
+                # A 1-character read is almost always a misread where
+                # binarisation fused two glyphs into one or dropped the
+                # leading digit — treat as no-read so the smoother
+                # ignores it rather than letting "5" or "7" pollute
+                # the vote tally and force false town-idle triggers.
+                if (r.current is not None
+                        and r.confidence >= 0.55
+                        and len(r.text) >= 2):
+                    raw = int(r.current)
+                # ── Temporal stabilisation (confidence-weighted vote) ──
+                # Append latest raw + confidence to ring buffer.
+                if raw is not None:
+                    self._buff_history.append((raw, float(r.confidence)))
+                else:
+                    # Keep the slot but signal "no read" via conf 0.
+                    self._buff_history.append((-1, 0.0))
+                if len(self._buff_history) > self._buff_window:
+                    del self._buff_history[: len(self._buff_history) - self._buff_window]
+                # Sum confidence per value over the window. Higher
+                # confidence reads weigh more — a single conf-0.95 read
+                # beats two conf-0.4 misreads. Skip the -1 placeholder
+                # rows so dropped frames don't count toward anything.
+                scores: dict[int, float] = {}
+                for val, conf in self._buff_history:
+                    if val < 0:
+                        continue
+                    scores[val] = scores.get(val, 0.0) + conf
+                if scores:
+                    best_val, best_score = max(scores.items(), key=lambda kv: kv[1])
+                    # Switch to a new leader whenever its summed
+                    # confidence clears the minimum AND exceeds the
+                    # current sticky value's score (if any). Prevents
+                    # the "첫 인식된 값이 latch" failure mode.
+                    if best_score >= self._buff_min_score:
+                        cur_score = scores.get(self._buff_smoothed, -1.0)
+                        if (self._buff_smoothed is None
+                                or best_val == self._buff_smoothed
+                                or best_score > cur_score):
+                            self._buff_smoothed = best_val
+                # buff_count exposes the smoothed value; trigger + UI
+                # labels read from this, not the raw per-frame number.
+                buff_count = self._buff_smoothed
 
         # Prefer OCR readings when valid (non-None, learnt templates
         # produced a confident parse). Falls back to legacy detectors
@@ -633,6 +913,10 @@ class Recognizer:
             pk_match_scale=pk_match_scale,
             potion_match_scale=potion_match_scale,
             overlay_matches=overlay_matches,
+            buff_count=buff_count,
+            buff_confidence=buff_confidence,
+            buff_text=buff_text,
+            buff_scanned=buff_scanned,
         )
 
 
