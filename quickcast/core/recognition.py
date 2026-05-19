@@ -207,22 +207,17 @@ _TS_DIAG = {"last": 0.0}    # throttled raw-score logger
 _ROI_FIX_REPORTED: dict[str, bool] = {}    # log ROI auto-fix once per kind
 
 
-# Multi-scale candidates around 1.0× — 5 단계 ±18% 팬으로 복원.
-# lock_aspect_profile + letterboxing 으로 16:9↔16:10 같은 큰 스트레치는
-# 사라졌지만, 사용자 측 DPI 스케일링/창모드 미세 차이 때문에 ±8%로는
-# 작은 아이콘(물약 13×13)이 누락되는 사례가 보고됨 → 다시 넓게.
-# 13×13 템플릿 기준 5-scale 매칭 비용은 한 프레임당 1ms 미만이라
-# CPU 부담은 무시 가능.
-_SCALE_CANDIDATES: tuple[float, ...] = (0.85, 0.93, 1.00, 1.08, 1.18)
-
-
-# Throttled "near-miss" diagnostic — when a slot is enabled but no
-# detection (score < threshold) we log raw scoring data once per N
-# seconds per kind so the user can see what the recognizer actually
-# saw without drowning the log card. Key is the kind string ("pk" /
-# "potion" / "overlay:xxx"); value is monotonic timestamp of last log.
-_NEAR_MISS_DIAG: dict[str, float] = {}
-_NEAR_MISS_INTERVAL = 3.0    # seconds between logs per kind
+# Multi-scale candidates — 0.60×~1.60× 광범위 팬.
+# 사용자 보고: 게임 창을 작게 줄이면 인식 누락이 늘어남. letterbox 정규화는
+# 1280×720으로 통일하지만, 작은 게임 창은 픽셀 보간이 더 들어가 아이콘이
+# 정규화 프레임 안에서 ~8 픽셀로 축소되어 들어오는 케이스 발생. 좁은 ±18%
+# 팬으로는 잡지 못해 인식 누락. ±60% 까지 확장해 작은 화면/큰 화면 양쪽
+# 다 커버. 1.0× 부근은 촘촘하게, 양 끝은 듬성하게.
+# 13×13 템플릿 기준 9-scale matchTemplate 한 프레임 비용 ≈ 2ms (10 fps에서
+# CPU 사용 ~2%) — 무시 가능.
+_SCALE_CANDIDATES: tuple[float, ...] = (
+    0.60, 0.72, 0.85, 0.93, 1.00, 1.08, 1.18, 1.35, 1.60,
+)
 
 
 def _template_search(roi_bgra: np.ndarray, target_bgra: np.ndarray,
@@ -375,40 +370,6 @@ def _template_score(roi_bgra: np.ndarray, target_bgra: np.ndarray,
     s, _, _ = _template_search(roi_bgra, target_bgra,
                                   scale_legacy=scale, _kind=_kind)
     return s
-
-
-def _maybe_log_near_miss(kind: str, score: float, threshold: int,
-                           local_xy: tuple[int, int], scale: float) -> None:
-    """Throttled diagnostic when score < threshold for an enabled slot.
-
-    Helps the user calibrate by exposing the *actual* score the matcher
-    is computing for PK / potion when they're enabled. Only logs when
-    the score is in the "near miss" band (10%~99% of threshold) — true
-    zero scores (slot OFF / template missing) and clean hits are skipped
-    to avoid log spam. Throttled per kind so a 10 fps capture loop
-    doesn't drown the dashboard log card.
-    """
-    if threshold <= 0 or score >= threshold:
-        return
-    floor = threshold * 0.10
-    if score < floor:
-        return
-    import time as _t
-    now = _t.monotonic()
-    last = _NEAR_MISS_DIAG.get(kind, 0.0)
-    if now - last < _NEAR_MISS_INTERVAL:
-        return
-    _NEAR_MISS_DIAG[kind] = now
-    try:
-        from quickcast.utils.logger import logger
-        pct = 100.0 * float(score) / float(threshold)
-        logger.info(
-            f"🎯 {kind} 인식 근접 — score={int(score):,} / 임계={threshold:,} "
-            f"({pct:.0f}%), best xy={local_xy}, scale={scale:.2f}× — "
-            f"임계값을 낮추거나 ROI/템플릿 재보정 검토"
-        )
-    except Exception:
-        pass
 
 
 class Recognizer:
@@ -727,10 +688,6 @@ class Recognizer:
             if local_xy != (-1, -1):
                 pk_match_xy = (settings.pk.cap.x + local_xy[0],
                                settings.pk.cap.y + local_xy[1])
-            _maybe_log_near_miss(
-                "pk", pk_score, int(settings.pk.threshold),
-                local_xy, pk_match_scale,
-            )
         else:
             pk_score = 0.0
 
@@ -745,10 +702,6 @@ class Recognizer:
             if local_xy != (-1, -1):
                 potion_match_xy = (settings.potion.cap.x + local_xy[0],
                                     settings.potion.cap.y + local_xy[1])
-            _maybe_log_near_miss(
-                "potion", potion_score, int(settings.potion.threshold),
-                local_xy, potion_match_scale,
-            )
         else:
             potion_score = 0.0
 
