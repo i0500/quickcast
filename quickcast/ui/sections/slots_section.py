@@ -165,18 +165,30 @@ def _bind_range(target_obj, lo_attr: str, hi_attr: str, color: str) -> QHBoxLayo
 def _bind_slot_sustain(slot) -> QHBoxLayout:
     """슬롯 인식 유지 시간 — 토글 + 1~5초 슬라이더.
 
-    토글이 꺼져 있으면 슬라이더는 비활성화 회색, 기존 즉시 발동 동작 유지.
-    켜두면 HP/MP 범위가 슬라이더 값(초) 동안 연속 만족돼야 발동한다.
+    HP/MP 행과 좌측 라벨/슬라이더 정렬을 맞춘다 (라벨 28px + 토글 + min/max
+    너비만큼의 스페이서 + 슬라이더 stretch + 우측 값 라벨). 토글이 꺼져
+    있으면 Qt 기본 disabled 처리에 맡겨 슬라이더를 회색으로 흐리게 한다.
+    켜두면 HP/MP 범위가 슬라이더 값(초) 동안 연속 만족돼야 발동.
     """
     row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
 
-    lbl = QLabel("인식 유지"); lbl.setFixedWidth(28)
+    # HP/MP 라벨과 동일 폭(28px) — "인식" 두 글자만 라벨에 두고 토글이
+    # 텍스트를 가리지 않도록 토글은 라벨 바깥에 위치.
+    lbl = QLabel("인식"); lbl.setFixedWidth(28)
     reactive(lbl, lambda: f"color:{T.palette.text_secondary}; font-weight:bold;")
     row.addWidget(lbl)
 
     tg = IOSToggle(width=36, height=18)
     tg.set_state(bool(getattr(slot, "sustain_enabled", False)), animate=False)
     row.addWidget(tg)
+
+    # HP/MP 행은 [min 64] [~ 10] [max 64] 가 슬라이더 앞에 들어가므로
+    # 같은 폭(64+10+64 + 간격 보정)으로 스페이서를 두어 슬라이더 시작
+    # 위치를 정렬한다. 우측 값 라벨 폭도 HP/MP 행의 % 입력 + 슬라이더
+    # 우측과 시각적으로 비슷한 64px.
+    spacer = QLabel("")
+    spacer.setFixedWidth(64 + 10 + 64 - 36 - 8)   # 토글 폭과 간격 차감
+    row.addWidget(spacer)
 
     # 1~5초, 0.1초 단위 (10..50)
     cur_sec = float(getattr(slot, "sustain_seconds", 3.0) or 3.0)
@@ -191,7 +203,7 @@ def _bind_slot_sustain(slot) -> QHBoxLayout:
     sl.setEnabled(bool(getattr(slot, "sustain_enabled", False)))
 
     val_lbl = QLabel(f"{cur_sec:.1f}초")
-    val_lbl.setFixedWidth(64); val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    val_lbl.setFixedWidth(48); val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
     reactive(val_lbl, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono}; font-size:11px;")
 
     def _on_tg(on: bool) -> None:
@@ -209,6 +221,7 @@ def _bind_slot_sustain(slot) -> QHBoxLayout:
             bus.settings_dirty.emit()
     sl.valueChanged.connect(_on_sl)
 
+    # PK/물약 인식 유지 슬라이더와 동일 QSS — 일관성 유지.
     def _qss() -> str:
         p = T.palette
         return (
@@ -220,8 +233,6 @@ def _bind_slot_sustain(slot) -> QHBoxLayout:
             f" border:2px solid {p.bg_canvas}; width:14px; height:14px;"
             f" margin:-5px 0; border-radius:8px; }}"
             f"QSlider::handle:horizontal:hover {{ background:{p.accent_hover}; }}"
-            f"QSlider:disabled::sub-page:horizontal {{ background:{p.text_tertiary}; }}"
-            f"QSlider:disabled::handle:horizontal {{ background:{p.text_tertiary}; }}"
         )
     reactive(sl, _qss)
 
