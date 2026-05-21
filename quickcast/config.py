@@ -157,6 +157,11 @@ class Slot(BaseModel):
     cooltime: float = 5.0       # seconds before slot can fire again
     repeat: bool = True
     tele_use: bool = False      # send Telegram on fire
+    # 인식 유지 조건 — sustain_enabled=True 면 HP/MP 범위가 sustain_seconds
+    # 동안 연속으로 만족돼야 발동. "체력 X% 이하 + 3초 이상 유지" 같은
+    # 보수적 발동 조건을 슬롯별로 켤 수 있게. 기본 OFF.
+    sustain_enabled: bool = False
+    sustain_seconds: float = 3.0   # UI 슬라이더 범위 1.0~5.0
 
 
 class PkSlot(BaseModel):
@@ -174,6 +179,9 @@ class PkSlot(BaseModel):
     cap_w: int = 43
     cap_h: int = 45
     threshold: int = 3_050_000
+    # 감지 상태가 이 시간(초) 이상 연속 유지될 때만 발동. 펫 오버레이
+    # 자동닫기와 동일한 오탐 방지 패턴. 0 ⇒ 즉시 발동(예전 동작).
+    sustain_seconds: float = 3.0
 
 
 class PotionSlot(BaseModel):
@@ -191,6 +199,8 @@ class PotionSlot(BaseModel):
     # potion. 150_000 ≈ 60% NORMED — calibrated against the real game
     # icon at 1280×720 client resolution.
     threshold: int = 150_000
+    # 빈 물약 아이콘이 이 시간(초) 이상 연속 유지될 때만 발동. 0 ⇒ 즉시.
+    sustain_seconds: float = 3.0
 
 
 class BuffCounter(BaseModel):

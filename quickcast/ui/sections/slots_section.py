@@ -20,6 +20,8 @@ from quickcast.ui.components.key_capture_dialog import KeyCaptureDialog
 from quickcast.ui.design.signals import bus
 from quickcast.ui.design.themed import reactive
 from quickcast.ui.design.tokens import T
+from PySide6.QtWidgets import QSlider
+
 from quickcast.ui.ios_toggle import IOSToggle
 from quickcast.ui.range_slider import RangeSlider
 from quickcast.ui.sections._mock_state import mock_settings, slot_state
@@ -160,6 +162,74 @@ def _bind_range(target_obj, lo_attr: str, hi_attr: str, color: str) -> QHBoxLayo
     return row
 
 
+def _bind_slot_sustain(slot) -> QHBoxLayout:
+    """슬롯 인식 유지 시간 — 토글 + 1~5초 슬라이더.
+
+    토글이 꺼져 있으면 슬라이더는 비활성화 회색, 기존 즉시 발동 동작 유지.
+    켜두면 HP/MP 범위가 슬라이더 값(초) 동안 연속 만족돼야 발동한다.
+    """
+    row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
+
+    lbl = QLabel("인식 유지"); lbl.setFixedWidth(28)
+    reactive(lbl, lambda: f"color:{T.palette.text_secondary}; font-weight:bold;")
+    row.addWidget(lbl)
+
+    tg = IOSToggle(width=36, height=18)
+    tg.set_state(bool(getattr(slot, "sustain_enabled", False)), animate=False)
+    row.addWidget(tg)
+
+    # 1~5초, 0.1초 단위 (10..50)
+    cur_sec = float(getattr(slot, "sustain_seconds", 3.0) or 3.0)
+    cur_sec = max(1.0, min(5.0, cur_sec))
+    cur_tenths = int(round(cur_sec * 10))
+    sl = QSlider(Qt.Horizontal)
+    sl.setRange(10, 50)
+    sl.setValue(cur_tenths)
+    sl.setMinimumWidth(120)
+    sl.setSingleStep(1); sl.setPageStep(5)
+    sl.setTickInterval(10); sl.setTickPosition(QSlider.NoTicks)
+    sl.setEnabled(bool(getattr(slot, "sustain_enabled", False)))
+
+    val_lbl = QLabel(f"{cur_sec:.1f}초")
+    val_lbl.setFixedWidth(64); val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    reactive(val_lbl, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono}; font-size:11px;")
+
+    def _on_tg(on: bool) -> None:
+        if bool(getattr(slot, "sustain_enabled", False)) != on:
+            slot.sustain_enabled = on
+            bus.settings_dirty.emit()
+        sl.setEnabled(on)
+    tg.toggled.connect(_on_tg)
+
+    def _on_sl(tenths: int) -> None:
+        secs = round(tenths / 10.0, 1)
+        val_lbl.setText(f"{secs:.1f}초")
+        if float(getattr(slot, "sustain_seconds", 0.0)) != secs:
+            slot.sustain_seconds = secs
+            bus.settings_dirty.emit()
+    sl.valueChanged.connect(_on_sl)
+
+    def _qss() -> str:
+        p = T.palette
+        return (
+            f"QSlider::groove:horizontal {{ background:{p.bg_input};"
+            f" border-radius:3px; height:6px; }}"
+            f"QSlider::sub-page:horizontal {{ background:{p.accent_default};"
+            f" border-radius:3px; }}"
+            f"QSlider::handle:horizontal {{ background:{p.accent_default};"
+            f" border:2px solid {p.bg_canvas}; width:14px; height:14px;"
+            f" margin:-5px 0; border-radius:8px; }}"
+            f"QSlider::handle:horizontal:hover {{ background:{p.accent_hover}; }}"
+            f"QSlider:disabled::sub-page:horizontal {{ background:{p.text_tertiary}; }}"
+            f"QSlider:disabled::handle:horizontal {{ background:{p.text_tertiary}; }}"
+        )
+    reactive(sl, _qss)
+
+    row.addWidget(sl, stretch=1)
+    row.addWidget(val_lbl)
+    return row
+
+
 def _build_editor(sid: str, on_label_or_key_change) -> QWidget:
     """Detail editor for slot `sid`. All controls bind to `mock_settings.slots[sid]`."""
     slot = mock_settings.slots[sid]
@@ -292,6 +362,9 @@ def _build_editor(sid: str, on_label_or_key_change) -> QWidget:
     mp_row.addWidget(mp_lbl)
     mp_row.addLayout(_bind_range(slot.mp, "min", "max", T.palette.mp_fill))
     cond.add(mp_row)
+    # 인식 유지 시간 — HP/MP 두 범위가 N초 동안 연속으로 만족돼야 발동.
+    # 토글로 활성화하고, 활성화 시 1~5초 슬라이더로 조절. 기본 OFF.
+    cond.add(_bind_slot_sustain(slot))
     v.addWidget(cond)
 
     v.addStretch(1)

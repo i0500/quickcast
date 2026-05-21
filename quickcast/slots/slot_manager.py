@@ -38,6 +38,11 @@ class SlotManager:
         self.cooldown = Cooldown()
         # Per-slot last-diag-log timestamp for throttling.
         self._last_diag: dict[str, float] = {}
+        # 발동 조건이 처음 만족된 시각 — sustain_seconds 동안 연속으로
+        # 유지될 때만 발동시키기 위한 타이머. 조건이 깨지면 해당 키를
+        # 제거하고, 발동에 성공하면 다음 사이클을 위해 다시 제거한다.
+        # 키: 슬롯 id ("1".."9","0","11"+, "pk", "potion").
+        self._cond_first_seen: dict[str, float] = {}
 
     def evaluate(
         self,
@@ -45,8 +50,10 @@ class SlotManager:
         analysis: FrameAnalysis,
     ) -> list[FireEvent]:
         events: list[FireEvent] = []
+        now = time.monotonic()
 
         # ───── ordinary slots (sorted: 1..9, 0, then 11+) ─────
+        active_ids: set[str] = set()
         for sid in self._slot_iteration_order(settings.slots):
             slot = settings.slots[sid]
             # Slot skip reasons go to DEBUG so the dashboard isn't
@@ -57,47 +64,115 @@ class SlotManager:
                 continue
             if not (slot.mp.min <= analysis.mp <= slot.mp.max):
                 continue
+            # 조건 만족 — sustain 타이머 갱신/체크. 쿨타임/sustain 미충족
+            # 시에도 first_seen은 유지해야 연속 유지 시간이 누적된다.
+            active_ids.add(sid)
+            first_seen = self._cond_first_seen.get(sid)
+            if first_seen is None:
+                self._cond_first_seen[sid] = now
+                first_seen = now
             if not self.cooldown.is_ready(sid):
+                continue
+            sustain = (
+                max(0.0, float(getattr(slot, "sustain_seconds", 0.0) or 0.0))
+                if bool(getattr(slot, "sustain_enabled", False))
+                else 0.0
+            )
+            held = now - first_seen
+            if sustain > 0.0 and held < sustain:
                 continue
 
             events.append(self._make_event(sid, slot))
             self.cooldown.trigger(sid, slot.cooltime)
+            # 발동 후 sustain 타이머 리셋 — 다음 사이클도 동일하게
+            # sustain 만큼 유지돼야 다시 발동한다.
+            self._cond_first_seen.pop(sid, None)
             if not slot.repeat:
                 slot.use = False
-            logger.info(
-                f"🎯 {slot.label}  키:{slot.key} ×{slot.count}  "
-                f"(HP {analysis.hp}%, MP {analysis.mp}%)"
-            )
+            if sustain > 0.0:
+                logger.info(
+                    f"🎯 {slot.label}  키:{slot.key} ×{slot.count}  "
+                    f"(HP {analysis.hp}%, MP {analysis.mp}%, 유지 {held:.1f}s)"
+                )
+            else:
+                logger.info(
+                    f"🎯 {slot.label}  키:{slot.key} ×{slot.count}  "
+                    f"(HP {analysis.hp}%, MP {analysis.mp}%)"
+                )
 
         # ───── PK slot ─────
         pk = settings.pk
-        if pk.use and analysis.pk_detected and self.cooldown.is_ready(self.PK_ID):
-            if pk.hp.min <= analysis.hp <= pk.hp.max:
-                events.append(FireEvent(
-                    slot_id=self.PK_ID, label="PK 대응",
-                    key=pk.key, count=pk.count, delay=pk.delay,
-                    tele_use=True, snapshot=True,
-                ))
-                self.cooldown.trigger(self.PK_ID, pk.cooltime)
-                if not pk.repeat:
-                    pk.use = False
-                logger.info(
-                    f"⚔️ PK 대응  키:{pk.key} ×{pk.count}  (HP {analysis.hp}%)"
-                )
+        pk_active = (
+            pk.use and analysis.pk_detected
+            and (pk.hp.min <= analysis.hp <= pk.hp.max)
+        )
+        if pk_active:
+            active_ids.add(self.PK_ID)
+            first_seen = self._cond_first_seen.get(self.PK_ID)
+            if first_seen is None:
+                self._cond_first_seen[self.PK_ID] = now
+                first_seen = now
+            if self.cooldown.is_ready(self.PK_ID):
+                sustain = max(0.0, float(getattr(pk, "sustain_seconds", 0.0) or 0.0))
+                held = now - first_seen
+                if sustain == 0.0 or held >= sustain:
+                    events.append(FireEvent(
+                        slot_id=self.PK_ID, label="PK 대응",
+                        key=pk.key, count=pk.count, delay=pk.delay,
+                        tele_use=True, snapshot=True,
+                    ))
+                    self.cooldown.trigger(self.PK_ID, pk.cooltime)
+                    self._cond_first_seen.pop(self.PK_ID, None)
+                    if not pk.repeat:
+                        pk.use = False
+                    if sustain > 0.0:
+                        logger.info(
+                            f"⚔️ PK 대응  키:{pk.key} ×{pk.count}  "
+                            f"(HP {analysis.hp}%, 유지 {held:.1f}s)"
+                        )
+                    else:
+                        logger.info(
+                            f"⚔️ PK 대응  키:{pk.key} ×{pk.count}  (HP {analysis.hp}%)"
+                        )
 
         # ───── Potion-empty slot (one-shot regardless of repeat) ─────
         potion = settings.potion
-        if potion.use and analysis.potion_empty:
-            if potion.hp.min <= analysis.hp <= potion.hp.max:
+        potion_active = (
+            potion.use and analysis.potion_empty
+            and (potion.hp.min <= analysis.hp <= potion.hp.max)
+        )
+        if potion_active:
+            active_ids.add(self.POTION_ID)
+            first_seen = self._cond_first_seen.get(self.POTION_ID)
+            if first_seen is None:
+                self._cond_first_seen[self.POTION_ID] = now
+                first_seen = now
+            sustain = max(0.0, float(getattr(potion, "sustain_seconds", 0.0) or 0.0))
+            held = now - first_seen
+            if sustain == 0.0 or held >= sustain:
                 events.append(FireEvent(
                     slot_id=self.POTION_ID, label="물약 부족 귀환",
                     key=potion.key, count=potion.count, delay=potion.delay,
                     tele_use=True, snapshot=True,
                 ))
                 potion.use = False
-                logger.info(
-                    f"🧪 물약 부족 → 귀환 키:{potion.key} ×{potion.count}  (HP {analysis.hp}%)"
-                )
+                self._cond_first_seen.pop(self.POTION_ID, None)
+                if sustain > 0.0:
+                    logger.info(
+                        f"🧪 물약 부족 → 귀환 키:{potion.key} ×{potion.count}  "
+                        f"(HP {analysis.hp}%, 유지 {held:.1f}s)"
+                    )
+                else:
+                    logger.info(
+                        f"🧪 물약 부족 → 귀환 키:{potion.key} ×{potion.count}  "
+                        f"(HP {analysis.hp}%)"
+                    )
+
+        # 조건이 더 이상 만족되지 않는 id의 sustain 타이머는 즉시 제거 —
+        # 다음 활성화 때 첫 감지 시각이 새로 잡혀야 한다.
+        for sid in list(self._cond_first_seen.keys()):
+            if sid not in active_ids:
+                self._cond_first_seen.pop(sid, None)
 
         return events
 
@@ -122,6 +197,13 @@ class SlotManager:
 
     def reset(self) -> None:
         self.cooldown.reset()
+        self._cond_first_seen.clear()
+
+    def reset_sustain(self) -> None:
+        """sustain 누적 타이머만 리셋. 사냥터 복귀 시퀀스 직후처럼 게임
+        상태가 점프적으로 바뀌어 "이전에 N초 유지됐다"가 의미를 잃는
+        시점에 호출한다. 쿨타임은 그대로 둔다."""
+        self._cond_first_seen.clear()
 
 
 __all__ = ["SlotManager", "FireEvent"]

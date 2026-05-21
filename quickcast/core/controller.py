@@ -610,6 +610,23 @@ class MacroController:
         except Exception:
             logger.exception("❌ 사냥터 복귀 시퀀스 오류")
         finally:
+            # 복귀 시퀀스가 끝나면 누적된 모든 인식/대기 타이머를 리셋.
+            # 그렇지 않으면: start_delay(2~5분) 동안 마을에 있어서 buff
+            # 카운터가 임계 이하로 내려가 _town_idle_started_at 이 잡혔는데,
+            # 복귀 시퀀스 동안 _tick_control 이 early return 으로 빠져
+            # 이 값이 "갱신은 안 되지만 살아있는 상태"로 동결된다. 시퀀스가
+            # 끝나는 순간 elapsed = (시퀀스 소요시간 + 잠재된 동결시간) 이
+            # 즉시 town_idle_seconds 를 넘어서 같은 복귀 시퀀스를 중복
+            # 발사하는 버그가 있었다. sustain/overlay 타이머도 같은 이유로
+            # 클리어 — "복귀 직전 1.8초 유지"가 복귀 후에도 이어지는 건
+            # 의미가 없다.
+            self._town_idle_started_at = None
+            self._overlay_first_seen_at.clear()
+            self._overlay_handled.clear()
+            try:
+                self.slot_manager.reset_sustain()
+            except Exception:
+                pass
             self.state.recovery_in_progress = False
 
     def _fire(self, event: FireEvent, frame: Optional[Frame]) -> None:

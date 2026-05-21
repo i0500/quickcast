@@ -204,6 +204,59 @@ def _bind_sensitivity(target, kind: str):
     return sens_row, sl
 
 
+def _bind_sustain(target) -> QHBoxLayout:
+    """PK/물약 인식 유지 시간 — 감지 상태가 N초 이상 연속될 때만 발동.
+
+    펫 오버레이 자동닫기와 동일한 오탐 방지 패턴. 0초면 즉시 발동(예전
+    동작), 1~5초가 일반적인 사용 구간. 사용자가 캡을 더 키울 수 있도록
+    상한은 10초로 둔다.
+    """
+    from PySide6.QtWidgets import QSlider
+    row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
+    lbl = QLabel("인식 유지"); lbl.setFixedWidth(_LABEL_W)
+    reactive(lbl, lambda: f"color:{T.palette.text_secondary}; font-size:12px;")
+    row.addWidget(lbl)
+
+    cur = float(getattr(target, "sustain_seconds", 0.0) or 0.0)
+    cur_tenths = max(0, min(100, round(cur * 10)))    # 0.0~10.0초 → 0..100 (0.1초 단위)
+    sl = QSlider(Qt.Horizontal)
+    sl.setRange(0, 100)
+    sl.setValue(cur_tenths)
+    sl.setMinimumWidth(120)
+    sl.setSingleStep(1); sl.setPageStep(10)
+    sl.setTickInterval(10); sl.setTickPosition(QSlider.NoTicks)
+
+    val_lbl = QLabel("즉시" if cur <= 0 else f"{cur:.1f}초")
+    val_lbl.setFixedWidth(124); val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    reactive(val_lbl, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono}; font-size:11px;")
+
+    def _on(tenths: int) -> None:
+        secs = round(tenths / 10.0, 1)
+        val_lbl.setText("즉시" if secs <= 0 else f"{secs:.1f}초")
+        if float(target.sustain_seconds) != secs:
+            target.sustain_seconds = secs
+            bus.settings_dirty.emit()
+    sl.valueChanged.connect(_on)
+
+    def _qss() -> str:
+        p = T.palette
+        return (
+            f"QSlider::groove:horizontal {{ background:{p.bg_input};"
+            f" border-radius:3px; height:6px; }}"
+            f"QSlider::sub-page:horizontal {{ background:{p.accent_default};"
+            f" border-radius:3px; }}"
+            f"QSlider::handle:horizontal {{ background:{p.accent_default};"
+            f" border:2px solid {p.bg_canvas}; width:14px; height:14px;"
+            f" margin:-5px 0; border-radius:8px; }}"
+            f"QSlider::handle:horizontal:hover {{ background:{p.accent_hover}; }}"
+        )
+    reactive(sl, _qss)
+
+    row.addWidget(sl, stretch=1)
+    row.addWidget(val_lbl)
+    return row
+
+
 # ───────── card builders ─────────
 def _bind_ios(target_obj, attr: str, label: str) -> QHBoxLayout:
     """Compact label + iOS toggle pair for booleans (사용/반복).
@@ -266,6 +319,8 @@ def _build_card(target, *, title: str, subtitle: str, kind: str) -> Card:
     card.add(_bind_hp_range(target))
     sens_row, _sl = _bind_sensitivity(target, kind)
     card.add(sens_row)
+    if hasattr(target, "sustain_seconds"):
+        card.add(_bind_sustain(target))
     return card
 
 
