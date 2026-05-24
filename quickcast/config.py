@@ -324,6 +324,12 @@ class RecoverySettings(BaseModel):
     # OCR-read buff count below this value counts as "in town". 75 mirrors
     # the user-provided sample where a full hunting buff stack shows 75.
     town_idle_threshold: int = 75
+    # Per-frame OCR confidence floor for the town-idle trigger. Reads below
+    # this value are treated as false positives — the timer doesn't advance
+    # and the smoothed buff count is ignored for trigger purposes. Raise to
+    # be stricter (fewer false fires, may miss real town states briefly);
+    # lower to be more sensitive (more false fires on noisy frames).
+    town_idle_min_confidence: float = 0.60
     # Slot IDs whose firing also kicks off the recovery sequence. Lets
     # the user wire any slot (e.g. a manually-cast town-return skill, or
     # a specific death-recovery hotkey) into the recovery flow.

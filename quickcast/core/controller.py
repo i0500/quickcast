@@ -475,10 +475,16 @@ class MacroController:
         # scanner actually produced a confident integer this tick — a None
         # ``buff_count`` (untrained / occluded badge) leaves the timer
         # cleared so we don't false-fire on missing data.
+        # Per-frame OCR confidence below ``town_idle_min_confidence`` is
+        # treated as a false read so noisy single-frame misreads don't
+        # advance the town-idle timer. User-adjustable in the capture tab.
         town_idle_active = False
         threshold_n = int(getattr(rec, "town_idle_threshold", 75))
+        min_conf = float(getattr(rec, "town_idle_min_confidence", 0.60) or 0.0)
+        buff_conf = float(getattr(analysis, "buff_confidence", 0.0) or 0.0)
         if rec.trigger_town_idle and getattr(analysis, "buff_scanned", False) \
-                and analysis.buff_count is not None:
+                and analysis.buff_count is not None \
+                and buff_conf >= min_conf:
             now_t = time.monotonic()
             below = analysis.buff_count < threshold_n
             if below:

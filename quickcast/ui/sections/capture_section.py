@@ -264,6 +264,32 @@ def make_capture() -> tuple[QWidget, QWidget]:
 
     conn_row.addWidget(sd); conn_row.addStretch(1); conn_row.addWidget(clear_btn)
     conn.add(conn_row)
+
+    # Source-size + DPI diagnostic — surfaces the "캡처 1/4 좌상단" symptom
+    # at a glance. 1280×720 is the recognition pipeline's normalised
+    # canvas; if the source is smaller, letterbox upscales (blurry) and
+    # if the DPI ≠ 96 the GetDpiForWindow correction kicked in.
+    src_lbl = QLabel("원본: -")
+    reactive(src_lbl, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono};")
+    conn.add(src_lbl)
+
+    def _on_src_info(w: int, h: int, dpi: int) -> None:
+        if w <= 0 or h <= 0:
+            src_lbl.setText("원본: - (캡처 대기)")
+            return
+        scale = (dpi / 96.0) if dpi > 0 else 1.0
+        scale_pct = int(round(scale * 100))
+        warn = ""
+        if w < 1280 or h < 720:
+            warn = "  ⚠ 1280×720 미만 — 인식률 저하 가능"
+        elif scale_pct != 100:
+            warn = f"  (보정됨 — 윈도우 배율 {scale_pct}%)"
+        src_lbl.setText(
+            f"원본: {w}×{h} · 윈도우 DPI {dpi} ({scale_pct}%)"
+            f" → 1280×720 정규화{warn}"
+        )
+    bus.capture_source_info.connect(_on_src_info)
+
     v.addWidget(conn)
 
     # Monitor fallback option
@@ -857,6 +883,33 @@ def _build_buff_ocr_card(state: dict, parent: "QWidget") -> "QWidget":
     dur_row.addStretch(1)
     card.add(dur_row)
 
+    # ── 오탐 범위 (OCR 신뢰도 하한) ──
+    # 한 프레임의 OCR conf가 이 값 미만이면 "오탐"으로 간주해 마을 대기
+    # 타이머를 진행시키지 않음. 기본 0.60. 올리면 더 엄격(오탐 ↓ / 진짜
+    # 마을 상태도 한두 프레임 놓칠 수 있음), 내리면 더 민감(잡음에 약함).
+    conf_row = QHBoxLayout(); conf_row.setSpacing(10)
+    conf_lbl = QLabel("오탐 범위 (OCR 신뢰도 하한):")
+    reactive(conf_lbl, lambda: f"color:{T.palette.text_secondary};")
+    conf_row.addWidget(conf_lbl)
+    conf_in = Stepper(
+        float(getattr(rec, "town_idle_min_confidence", 0.60)),
+        0.0, 1.0, 0.05, 2, "", width=120,
+    )
+    conf_in.setToolTip(
+        "한 프레임의 OCR 신뢰도가 이 값 미만이면 마을 대기로 판정하지 않음.\n"
+        "기본 0.60. 높일수록 오탐이 줄지만 인식이 깐깐해지고, 낮출수록 민감해짐."
+    )
+    def _on_conf(v: float) -> None:
+        new = max(0.0, min(1.0, float(v)))
+        cur = float(getattr(rec, "town_idle_min_confidence", 0.60))
+        if abs(cur - new) > 1e-6:
+            rec.town_idle_min_confidence = new
+            bus.settings_dirty.emit()
+    conf_in.valueChanged.connect(_on_conf)
+    conf_row.addWidget(conf_in)
+    conf_row.addStretch(1)
+    card.add(conf_row)
+
     # 실시간 인식 결과 표시
     live = QLabel("OCR 결과: -")
     reactive(live, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono};")
@@ -869,10 +922,14 @@ def _build_buff_ocr_card(state: dict, parent: "QWidget") -> "QWidget":
         conf = getattr(analysis, "buff_confidence", 0.0)
         text = getattr(analysis, "buff_text", "")
         thr_n = mock_settings.recovery.town_idle_threshold
+        min_c = float(getattr(rec, "town_idle_min_confidence", 0.60))
         if cnt is None:
             live.setText(f"OCR 결과: text={text!r}  conf={conf:.2f}  (값 미확정)")
         else:
-            tag = "마을 대기 ▼" if cnt < thr_n else "정상"
+            if conf < min_c:
+                tag = f"오탐 무시 (conf<{min_c:.2f})"
+            else:
+                tag = "마을 대기 ▼" if cnt < thr_n else "정상"
             live.setText(f"OCR 결과: {cnt}  conf={conf:.2f}  [{tag}, 임계={thr_n}]")
     bus.live_frame.connect(_on_analysis)
 

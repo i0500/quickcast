@@ -234,6 +234,16 @@ class AppWindow(AppShell):
         bus.alarm_list_changed.connect(
             lambda: NotificationCenter.toast("알람 목록 갱신", level="info"))
 
+        # GitHub 릴리즈 업데이트 체크 — 시작 5초 후 + 6시간마다.
+        # 새 버전 감지 시 사이드바 ‘설정’ 아이콘에 빨간 점 + 토스트.
+        # 사용자가 ‘설정’으로 들어가서 [업데이트 확인]을 누르거나 자동
+        # 다이얼로그 한 번 띄워서 릴리즈 페이지로 안내한다.
+        from quickcast.utils.update_check import UpdateChecker
+        self._update_checker = UpdateChecker(self)
+        self._update_prompted = False
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.start_periodic()
+
         # First-run tutorial — auto-launches if the user hasn't done it
         # yet, OR if QUICKCAST_FORCE_TUTORIAL is set (the desktop "Design
         # Preview" shortcut sets this so the tutorial always shows
@@ -278,6 +288,47 @@ class AppWindow(AppShell):
                 NotificationCenter.toast("❌ 튜토리얼 시작 실패", level="danger", duration_ms=4000)
             except Exception:
                 pass
+
+    def _on_update_available(self, current: str, latest: str, url: str) -> None:
+        """Show red-dot badge on the settings icon + one-shot toast/dialog.
+
+        Called when UpdateChecker confirms a newer release tag than the
+        running build. The badge persists for the rest of the session
+        (cleared on app restart or manual dismiss). The dialog is shown
+        only once per session so an idle user with the app open doesn't
+        get re-nagged every 6 hours.
+        """
+        try:
+            self.activity.set_badge("settings", True)
+        except Exception:
+            logger.exception("update-check: 사이드바 배지 표시 실패")
+        try:
+            NotificationCenter.toast(
+                f"🔔 새 버전 {latest} (현재 v{current}) — 설정 → 정보에서 확인",
+                level="info", duration_ms=5000,
+            )
+        except Exception:
+            pass
+        if self._update_prompted:
+            return
+        self._update_prompted = True
+        # 자동 다이얼로그는 세션당 한 번만. 사용자가 ‘나중에’를 누르면
+        # 다음 실행 때 다시 안내한다 (백그라운드 6시간 폴링은 계속).
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            ret = QMessageBox.question(
+                self, "QuickCast 업데이트",
+                f"새 버전 {latest}가 공개되었습니다.\n"
+                f"현재 버전: v{current}\n\n"
+                "다운로드 페이지를 지금 열까요?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if ret == QMessageBox.Yes and url:
+                QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            logger.exception("update-check: 업데이트 다이얼로그 표시 실패")
 
     def _on_tutorial_finished(self, completed: bool) -> None:
         # Don't persist the "completed" flag when running in design-
@@ -367,6 +418,17 @@ class AppWindow(AppShell):
             # Re-broadcast on bus so secondary previews (fullscreen,
             # picture-in-picture, …) can mirror the same frame.
             bus.live_frame.emit(image, analysis, fps)
+            # Pipe source dimensions + window DPI to any diagnostic UI
+            # (capture card label). Comes from the active capture backend
+            # so window-capture and monitor-capture both contribute.
+            try:
+                cap = getattr(self.controller, "capture", None)
+                if cap is not None:
+                    sw, sh = getattr(cap, "last_source_size", (0, 0))
+                    sdpi = int(getattr(cap, "last_window_dpi", 96))
+                    bus.capture_source_info.emit(int(sw), int(sh), sdpi)
+            except Exception:
+                pass
             # Forward per-overlay match scores so the capture section's
             # overlay-close card can update its live "점수: N" labels.
             ov = getattr(analysis, "overlay_matches", None)

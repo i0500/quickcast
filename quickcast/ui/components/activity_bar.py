@@ -44,6 +44,9 @@ class _ActivityButton(QToolButton):
         self.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
         self.setToolTip(item.tooltip)
         self.setCursor(Qt.PointingHandCursor)
+        # Red-dot badge for notifications (update available, etc.). Drawn
+        # in the top-right corner by paintEvent when ``_badge`` is True.
+        self._badge: bool = False
         # Use bg_hover token so the hover tint works on both light and dark.
         def _qss() -> str:
             return (
@@ -62,13 +65,32 @@ class _ActivityButton(QToolButton):
         super().setChecked(on)
         self._refresh_icon()
 
+    def set_badge(self, show: bool) -> None:
+        new = bool(show)
+        if new == self._badge:
+            return
+        self._badge = new
+        self.update()
+
     def paintEvent(self, e) -> None:
         super().paintEvent(e)
-        if self.isChecked():
-            p = QPainter(self)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(T.palette.accent_default))
-            p.drawRect(0, 6, 3, self.height() - 12)
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            if self.isChecked():
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(T.palette.accent_default))
+                p.drawRect(0, 6, 3, self.height() - 12)
+            if self._badge:
+                # 8px red dot in the top-right of the icon — small enough
+                # to read as a "notification" badge, not a state colour.
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#E5484D"))
+                cx = self.width() - 14
+                cy = 10
+                p.drawEllipse(cx - 4, cy - 4, 8, 8)
+        finally:
+            p.end()
 
 
 class ActivityBar(QFrame):
@@ -108,6 +130,12 @@ class ActivityBar(QFrame):
         for sid, btn in self._buttons.items():
             btn.setChecked(sid == item_id)
         self.section_changed.emit(item_id)
+
+    def set_badge(self, item_id: str, show: bool) -> None:
+        """Toggle the red-dot notification badge on a specific item."""
+        btn = self._buttons.get(item_id)
+        if btn is not None:
+            btn.set_badge(show)
 
 
 __all__ = ["ActivityBar", "ActivityItem"]

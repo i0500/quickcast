@@ -64,6 +64,21 @@ user32.ReleaseDC.restype = ctypes.c_int
 user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
 user32.PrintWindow.restype = wintypes.BOOL
 
+# GetDpiForWindow — Win10 1607+. Used to detect DPI-aware/unaware
+# mismatch between our PMv2 process and the target game window. When
+# the game is DPI-unaware (or running on a different scale monitor),
+# GetClientRect returns a virtualised/logical size while PrintWindow
+# renders the actual physical pixels — so the bitmap we allocated is
+# the wrong size and PrintWindow draws into the top-left corner only.
+# We scale the client rect by the window's DPI ratio to keep the
+# allocation in step with what PrintWindow will actually paint.
+try:
+    user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+    user32.GetDpiForWindow.restype = wintypes.UINT
+    _HAS_GET_DPI_FOR_WINDOW = True
+except Exception:
+    _HAS_GET_DPI_FOR_WINDOW = False
+
 gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
 gdi32.CreateCompatibleDC.restype = wintypes.HDC
 gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
@@ -139,6 +154,10 @@ class WindowPrintCapture:
         # Read by the controller to detect aspect-ratio changes and swap
         # ROI profiles accordingly.
         self.last_source_size: tuple[int, int] = (0, 0)
+        # Most recently observed window DPI (96 = 100% scaling). Exposed
+        # for the capture UI's diagnostic label so users can spot DPI
+        # mismatch problems at a glance.
+        self.last_window_dpi: int = 96
 
     @property
     def description(self) -> str:
@@ -157,6 +176,30 @@ class WindowPrintCapture:
             raise RuntimeError("GetClientRect failed")
         w = rect.right - rect.left
         h = rect.bottom - rect.top
+        # ── DPI mismatch correction ──
+        # Our process is PMv2 (see main._force_pmv2_dpi); the target game
+        # window may be running with a different DPI awareness context
+        # (System-aware, Unaware, or a different per-monitor monitor).
+        # In those cases GetClientRect returns a virtualised/logical size
+        # while PrintWindow actually paints at the window's true physical
+        # size — so the bitmap we allocate ends up larger than the painted
+        # area and PrintWindow draws into the top-left corner only,
+        # producing the "캡처 화면 1/4 좌상단에 게임이 작게 잡힘" symptom
+        # reported under Windows 125%/150% scaling.
+        # Solve it by querying the window's own DPI and scaling the client
+        # rect by win_dpi/96 so the bitmap matches what PrintWindow paints.
+        win_dpi = 96
+        if _HAS_GET_DPI_FOR_WINDOW and w > 0 and h > 0:
+            try:
+                d = int(user32.GetDpiForWindow(self.hwnd) or 96)
+                if d > 0:
+                    win_dpi = d
+            except Exception:
+                win_dpi = 96
+            if win_dpi != 96:
+                w = max(1, int(round(w * win_dpi / 96.0)))
+                h = max(1, int(round(h * win_dpi / 96.0)))
+        self.last_window_dpi = int(win_dpi)
         minimized = (w <= 0 or h <= 0)
         if minimized:
             # Use the cached restored-state size so we can still ask

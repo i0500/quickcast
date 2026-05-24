@@ -312,10 +312,63 @@ def _panel_data() -> QWidget:
         # Mutate mock_settings IN PLACE so all sections see the new values.
         for fname in type(new_settings).model_fields:
             setattr(mock_settings, fname, getattr(new_settings, fname))
+        # ── slot_state 동기화 ──
+        # 사이드바 / 대시보드 슬롯 행은 mock_settings.slots 가 아니라
+        # 전역 slot_state 캐시에서 라벨/키/사용여부를 읽기 때문에, import
+        # 직후 slot_state 도 함께 새 값으로 다시 채워야 슬롯 이름이 바뀐다.
+        try:
+            from quickcast.ui.sections._mock_state import slot_state
+            slot_state._on.clear()
+            slot_state._label.clear()
+            slot_state._key.clear()
+            for sid, slot in mock_settings.slots.items():
+                slot_state._on[sid] = bool(getattr(slot, "use", False))
+                slot_state._label[sid] = str(getattr(slot, "label", sid))
+                slot_state._key[sid] = str(getattr(slot, "key", "0"))
+        except Exception:
+            logger.exception("import: slot_state 동기화 실패")
+        # ── 즉시 디스크 저장 ──
+        # 평소 settings_dirty 는 debounced 저장이지만, import 결과는
+        # 사용자가 재시작을 선택할 가능성이 높으므로 곧바로 디스크에
+        # 반영해서 재시작 후에도 같은 상태로 부팅되도록 한다.
+        try:
+            mock_settings.save()
+        except Exception:
+            logger.exception("import: 즉시 저장 실패 — debounce 경로로 폴백")
         bus.settings_dirty.emit()
         bus.slot_list_changed.emit(); bus.alarm_list_changed.emit()
-        QMessageBox.information(w, "가져오기 완료",
-            "설정을 가져왔습니다. 일부 화면은 다시 진입하면 갱신됩니다.")
+        # ── 재시작 프롬프트 ──
+        # 대다수 위젯은 빌드 시점의 값을 캐시하고 있어 import 만으로는
+        # 슬라이더/스테퍼/체크박스가 갱신되지 않는다 (데이터는 정확히
+        # 반영되지만 화면이 옛 값). 재시작이 가장 확실하므로 사용자에게
+        # 명시적으로 안내한다.
+        ret = QMessageBox.question(
+            w, "가져오기 완료",
+            "설정 파일을 정상적으로 가져왔습니다.\n"
+            "(슬롯/복귀/PK/물약/ROI/마을/오버레이 등 모든 값이 디스크에 저장됨)\n\n"
+            "현재 실행 중인 위젯에 전부 반영하려면 프로그램을 다시 시작해야 합니다.\n"
+            "지금 다시 시작하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if ret == QMessageBox.Yes:
+            _restart_app()
+
+    def _restart_app() -> None:
+        """현재 프로세스를 종료하고 동일 인자로 새로 띄운다."""
+        try:
+            import sys
+            from PySide6.QtCore import QProcess
+            # frozen(.exe)이면 sys.executable 자체가 quickcast.exe.
+            # dev 실행이면 sys.executable + sys.argv 조합으로 재실행.
+            if getattr(sys, "frozen", False):
+                QProcess.startDetached(sys.executable, sys.argv[1:])
+            else:
+                QProcess.startDetached(sys.executable, sys.argv)
+            QApplication.quit()
+        except Exception:
+            logger.exception("auto-restart 실패 — 수동으로 재시작 필요")
+            QMessageBox.warning(w, "재시작 실패",
+                "자동 재시작이 실패했습니다. 프로그램을 수동으로 다시 시작해주세요.")
 
     def _do_export() -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -347,16 +400,65 @@ _BMC_URL = "https://buymeacoffee.com/snjdevs"
 def _panel_about() -> QWidget:
     from PySide6.QtCore import QUrl
     from PySide6.QtGui import QDesktopServices
+    from quickcast import __version__ as _ver
 
     w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(14)
     card = Card("정보")
     title = QLabel("QuickCast")
     f = QFont(); f.setBold(True); f.setPointSize(15); title.setFont(f)
     card.add(title)
+    ver_lbl = QLabel(f"버전 v{_ver}")
+    reactive(ver_lbl, lambda: f"color:{T.palette.text_secondary};")
+    card.add(ver_lbl)
     card.add(QLabel("Python · PySide6 · OpenCV · mss · pyserial"))
     copy = QLabel("\xa9 2026 S&J Devs")
     reactive(copy, lambda: f"color:{T.palette.text_secondary};")
     card.add(copy)
+
+    # ── 업데이트 확인 ──
+    # 자동 6시간 폴링과 별개로 사용자가 수동 트리거할 수 있게. 결과는
+    # UpdateChecker가 emit하는 check_finished 시그널로 상태 라벨에 표시.
+    upd_row = QHBoxLayout(); upd_row.setSpacing(10)
+    upd_btn = IconButton("업데이트 확인", "refresh-cw", size="sm")
+    upd_status = QLabel("")
+    reactive(upd_status, lambda: f"color:{T.palette.text_tertiary}; font-size:12px;")
+
+    def _do_check() -> None:
+        from quickcast.utils.update_check import UpdateChecker, is_newer
+        from quickcast import __version__ as cur
+        # 일회용 체커 — 메인 윈도우의 폴링과 별개로 사용자 클릭에 응답.
+        # only_in_frozen=False 로 dev 모드에서도 동작 (단 1.0.3 같은
+        # tagged 버전을 박아두지 않으면 비교 결과가 의미 없음).
+        checker = UpdateChecker(w, only_in_frozen=False)
+        upd_status.setText("확인 중…")
+        def _done(ok: bool, msg: str) -> None:
+            if ok and msg.startswith("새 버전"):
+                upd_status.setText(f"✓ {msg}")
+            elif ok:
+                upd_status.setText(f"✓ 최신 버전 (v{cur})")
+            else:
+                upd_status.setText(f"✗ 확인 실패 — {msg}")
+            try:
+                checker.deleteLater()
+            except Exception:
+                pass
+        def _found(c: str, latest: str, url: str) -> None:
+            ret = QMessageBox.question(
+                w, "QuickCast 업데이트",
+                f"새 버전 {latest}가 공개되었습니다.\n"
+                f"현재 버전: v{c}\n\n"
+                "다운로드 페이지를 지금 열까요?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if ret == QMessageBox.Yes and url:
+                QDesktopServices.openUrl(QUrl(url))
+        checker.check_finished.connect(_done)
+        checker.update_available.connect(_found)
+        checker.check_now()
+    upd_btn.clicked.connect(_do_check)
+    upd_row.addWidget(upd_btn); upd_row.addWidget(upd_status); upd_row.addStretch(1)
+    card.add(upd_row)
+
     v.addWidget(card)
 
     donate = Card("후원")

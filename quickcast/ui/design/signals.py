@@ -51,6 +51,11 @@ class _SignalBus(QObject):
     # window, …) can mirror the real game image without each rebuilding
     # its own recognizer/timer.
     live_frame = Signal(object, object, float)
+    # Source-window diagnostics — (source_w, source_h, window_dpi).
+    # Lets the capture UI show "원본 1280×720 @ 96 DPI" so DPI mismatches
+    # (game window rendering at a fraction of the bitmap, etc.) are
+    # immediately visible. Emitted once per frame from AppWindow.
+    capture_source_info = Signal(int, int, int)
     # Connection requests from Settings UI → AppWindow
     arduino_connect_request = Signal()
     telegram_connect_request = Signal()

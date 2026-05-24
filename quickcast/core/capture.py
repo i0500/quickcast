@@ -131,6 +131,9 @@ class _MssBase:
         # by the controller to detect aspect-ratio changes so it can
         # swap to the matching ROI profile.
         self.last_source_size: tuple[int, int] = (0, 0)
+        # Monitor-capture has no per-window DPI to query, so this stays
+        # 96; the diagnostic UI just shows source size without DPI then.
+        self.last_window_dpi: int = 96
 
     def _sct(self) -> mss.base.MSSBase:
         sct = getattr(self._tls, "sct", None)
