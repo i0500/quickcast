@@ -526,21 +526,22 @@ def run() -> None:
                 return
             if prof.enabled == on:
                 return
-            prof.enabled = on
-            # Mirror into active top-level if this is the active tab so
-            # controller picks it up immediately on next _tick_control.
-            if cid == settings.active_client_id:
-                # ClientProfile.enabled is read via self.profile.enabled
-                # in MacroController, which always returns the fresh
-                # dict-lookup'd profile — no top-level mirror needed.
-                pass
-            bus.settings_dirty.emit()
-            # Update the client-tabs ●ON indicator in the main window.
+            # Find that client's controller so we get grace/cooldown
+            # side effects (not just a flag flip). All controllers are
+            # tracked in AppWindow._controllers — fresh after tab swaps.
+            ctrl_map = getattr(window, "_controllers", None) or {}
+            ctrl = ctrl_map.get(cid)
+            if ctrl is not None:
+                ctrl.set_enabled(on)
+            else:
+                prof.enabled = on
+            # Broadcast — titlebar Master mirror picks this up if cid is
+            # currently active; ClientTabs ●dot mirrors on every emit.
             try:
-                if window._client_tabs is not None:
-                    window._client_tabs.set_enabled_dot(cid, bool(on))
+                bus.client_enable_changed.emit(cid, bool(on))
             except Exception:
                 pass
+            bus.settings_dirty.emit()
             logger.info(
                 f"{'▶️' if on else '⏸️'} [{prof.label}] 플로터 토글 "
                 f"→ enabled={on}"
@@ -655,6 +656,30 @@ def run() -> None:
                 except Exception:
                     pass
     bus.settings_dirty.connect(_resync_floaters_from_profiles)
+
+    # Cross-mirror titlebar Master ↔ per-client floater states.
+    # When the titlebar (or shortcut) flips the active client's enabled,
+    # this updates the matching floater. When a floater flips a client's
+    # enabled, this updates the titlebar IF that client is active.
+    def _on_client_enable_changed(cid: str, on: bool) -> None:
+        fl = floaters.get(cid)
+        if fl is not None:
+            try:
+                fl.set_state(bool(on))
+            except Exception:
+                pass
+        if cid == settings.active_client_id:
+            try:
+                window.title_bar.set_master(bool(on))
+            except Exception:
+                pass
+        # ClientTabs ●dot stays in sync too.
+        try:
+            if window._client_tabs is not None:
+                window._client_tabs.set_enabled_dot(cid, bool(on))
+        except Exception:
+            pass
+    bus.client_enable_changed.connect(_on_client_enable_changed)
 
     # Wire alarm to UI via bus.alarm_fired so PySide6 marshals only
     # primitive types across the alarm-thread → GUI-thread boundary.

@@ -82,6 +82,10 @@ class _SignalBus(QObject):
     # ClientProfile sub-models that get whole-object swapped by
     # Settings._apply_client.
     client_changed = Signal(str)    # new active client_id
+    # Per-client enabled flag flipped from anywhere (titlebar Master /
+    # floater / programmatic set). Floater + titlebar mirrors subscribe
+    # to stay in sync without manual cross-wiring at every call site.
+    client_enable_changed = Signal(str, bool)    # (client_id, enabled)
     # Fired by AppWindow when the controller auto-disabled a one-shot
     # toggle (potion.use=False after fire, pk.use=False on non-repeat,
     # slot.use=False on non-repeat). Sections re-read settings and

@@ -133,15 +133,25 @@ class MacroController:
         self.state.capture_connected = False
         logger.debug("MacroController stopped")
 
-    def set_master_switch(self, on: bool) -> None:
-        self.settings.master_switch = on
+    def set_enabled(self, on: bool) -> None:
+        """Toggle this client's macro gate + side effects.
+
+        Replaces the old set_master_switch role (cooldown reset + grace
+        start + recovery latch clear) but scoped to THIS controller's
+        ClientProfile rather than the long-retired global master_switch.
+        The titlebar Master toggle and the floater both call this on the
+        active client.
+        """
+        prof = self.profile
+        if prof is not None:
+            prof.enabled = on
         if on:
             self.state.recovery_stop.clear()
             try:
                 self.slot_manager.cooldown.reset()
             except Exception:
                 pass
-            # Clear recovery edge-trigger latches so a fresh master
+            # Clear recovery edge-trigger latches so a fresh enable
             # cycle starts with all triggers eligible again.
             self.state.recovery_handled.clear()
             self.state._last_recovery_at = 0.0
@@ -149,13 +159,22 @@ class MacroController:
             # immediately fire on a stale timer from the previous run.
             self._town_idle_started_at = None
             self.state.begin_master_grace(3.0)
-            logger.info("🟢 마스터 ON  (3초 후 가동, 모든 쿨타임 초기화)")
+            tag = getattr(prof, "label", "") or self.client_id
+            logger.info(f"🟢 [{tag}] 매크로 ON (3초 후 가동, 쿨타임 초기화)")
         else:
             self.state.end_master_grace()
             if self.state.recovery_in_progress:
                 self.state.recovery_stop.set()
             self.state._last_recovery_at = 0.0
-            logger.info("🔴 마스터 OFF")
+            tag = getattr(prof, "label", "") or self.client_id
+            logger.info(f"🔴 [{tag}] 매크로 OFF")
+
+    def set_master_switch(self, on: bool) -> None:
+        """Legacy alias — kept for any callers that still poke the
+        global master_switch field. Forwards to set_enabled() so the
+        actual per-client gate state stays consistent."""
+        self.settings.master_switch = on
+        self.set_enabled(on)
 
     # ───────── capture thread ─────────
     def _capture_loop(self) -> None:
@@ -274,12 +293,10 @@ class MacroController:
             self._stop.wait(0.1)  # ~100 ms cadence, matches JS
 
     def _tick_control(self) -> None:
-        if not self.settings.master_switch:
-            return
-        # Per-client enable gate — when running two clients concurrently
-        # the user can pause one tab independently via its ClientProfile
-        # toggle without flipping the global master. Read fresh every
-        # tick so the UI toggle takes effect within ~100 ms.
+        # Single gate per client — ClientProfile.enabled. Master "global"
+        # was retired: the titlebar Master toggle now writes onto the
+        # active tab's profile.enabled (same field as the floater). Both
+        # toggles + the per-tab ●dot stay synchronised via the UI layer.
         if not getattr(self.profile, "enabled", True):
             return
         if self.state.in_grace_period():
@@ -614,7 +631,7 @@ class MacroController:
         def _aborted() -> bool:
             return (self._stop.is_set()
                     or self.state.recovery_stop.is_set()
-                    or not self.settings.master_switch)
+                    or not getattr(self.profile, "enabled", True))
 
         def _wait(seconds: float) -> bool:
             """Wait `seconds`, returning True if we were aborted mid-sleep.

@@ -206,12 +206,24 @@ class AppWindow(AppShell):
         t_ok = telegram is not None and getattr(telegram, "connected", False)
         self.status_bar.update_arduino(a_ok, settings.arduino_port if a_ok else "미연결")
         self.status_bar.update_telegram(t_ok, "연결됨" if t_ok else "미연결")
-        # Belt-and-braces master OFF: reset both the UI and the controller's
-        # internal state so the macro never fires until the user explicitly
-        # clicks the toggle.
+        # Belt-and-braces safety on boot: every client starts disabled so
+        # no macro fires until the user explicitly turns the active tab
+        # on (titlebar Master toggle, floater, or shortcut). master_switch
+        # field is retired but cleared too in case any legacy reader
+        # short-circuits on it.
         self.settings.master_switch = False
-        if self.controller is not None:
-            self.controller.set_master_switch(False)
+        for _cid, _prof in self.settings.clients.items():
+            _prof.enabled = False
+        # Every controller (active + standbys) gets the OFF treatment so
+        # cooldown / grace state starts clean.
+        try:
+            for _ctrl in self._all_controllers().values():
+                try:
+                    _ctrl.set_enabled(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self.set_master(False)
         # Broadcast initial connection state so Settings dots match.
         bus.arduino_state_changed.emit(a_ok, settings.arduino_port if a_ok else "미연결")
@@ -544,23 +556,33 @@ class AppWindow(AppShell):
     def _toggle_master(self) -> None:
         # Menu/shortcut path → route through the single handler so
         # countdown + controller + visual all stay in sync.
-        new = not self.settings.master_switch
+        new = not bool(self.settings.get_profile().enabled)
         self._on_master_toggled(new)
 
     def _on_master_toggled(self, on: bool) -> None:
-        # Single source of truth for master state changes — fires
-        # whether the user clicked the title-bar toggle, the floater,
-        # or hit a menu shortcut. We update the visual mirror ourselves
-        # so the title bar reflects the new state when the change came
-        # from somewhere other than the title bar's own toggle.
-        self.settings.master_switch = on
-        self.set_master(on)  # visual mirror (titlebar + statusbar)
+        """Titlebar Master toggle — now scoped to the ACTIVE tab.
+
+        The global ``master_switch`` field was retired; this toggle and
+        every floater share one gate per client: ``ClientProfile.enabled``.
+        Inactive tabs are not touched (use their own floater for that).
+        """
+        active_cid = self.settings.active_client_id
+        prof = self.settings.get_profile()
+        # Per-client gate flip + grace/cooldown side effects.
         if self.controller is not None:
-            self.controller.set_master_switch(on)
+            self.controller.set_enabled(on)
+        else:
+            prof.enabled = on
+        # Visual mirrors — titlebar, status bar, ClientTabs ●dot, floater.
+        self.set_master(on)
+        if hasattr(self, "_client_tabs") and self._client_tabs is not None:
+            self._client_tabs.set_enabled_dot(active_cid, on)
+        bus.client_enable_changed.emit(active_cid, on)
         if on:
             self._start_grace_countdown(3.0)
         else:
             self._stop_grace_countdown()
+        bus.settings_dirty.emit()
         self.save_debounced()
 
     def _start_grace_countdown(self, seconds: float) -> None:
@@ -743,10 +765,13 @@ class AppWindow(AppShell):
         except Exception:
             pass
 
-        # 4. Refresh tab visuals (active highlight, ON-dots).
+        # 4. Refresh tab visuals (active highlight, ON-dots) +
+        # titlebar Master toggle (now scoped to active tab's enabled).
         self._client_tabs.set_active(new_cid)
         for cid, prof in self.settings.clients.items():
             self._client_tabs.set_enabled_dot(cid, bool(prof.enabled))
+        # Master toggle visual mirror — no signal emit (no toggled).
+        self.set_master(bool(self.settings.get_profile().enabled))
 
         # Sections that bind to per-client sub-models (combat PK/Potion,
         # recovery, …) rebuild themselves on this signal — their previous
