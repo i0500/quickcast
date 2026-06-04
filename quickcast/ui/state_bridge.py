@@ -118,6 +118,33 @@ def wire_persistence(save_now) -> None:
 
     alarm_state.alarm_toggled.connect(_on_alarm_toggled)
 
+    # Multi-client: when the active tab swaps, reseed slot_state /
+    # alarm_state from the now-active ClientProfile (which is mirrored
+    # into top-level mock_settings.* by Settings.switch_client). Without
+    # this the dashboard sidebar's skill / alarm toggles stay frozen on
+    # the previous tab's data.
+    try:
+        from quickcast.ui.design.signals import bus
+    except Exception:
+        return
+
+    def _reseed_on_client_change(_cid: str) -> None:
+        _seed_slot_state_from_settings(_mock_state.mock_settings)
+        _seed_alarm_state_from_settings(_mock_state.mock_settings)
+        # Tell reactive sections to redraw against the freshly-seeded
+        # singletons. AppWindow also emits these on client swap so
+        # double-emit is harmless (rebuild is idempotent).
+        try:
+            bus.slot_list_changed.emit()
+        except Exception:
+            pass
+        try:
+            bus.alarm_list_changed.emit()
+        except Exception:
+            pass
+
+    bus.client_changed.connect(_reseed_on_client_change)
+
 
 # ───────── seeding helpers ─────────
 def _seed_slot_state_from_settings(settings: Settings) -> None:

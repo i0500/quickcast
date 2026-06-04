@@ -711,49 +711,108 @@ class Settings(BaseModel):
         )
 
     def _apply_client(self, p: "ClientProfile") -> None:
-        """Load a profile's fields into top-level (mutating active state).
+        """Load a profile's fields into top-level (in-place mutate).
 
-        Inverse of ``_snapshot_client``. After this call settings.slots /
-        settings.pk / settings.capture_window_title etc. reflect the
-        supplied profile, so existing UI/controller code reading from
-        the top-level sees the newly active tab's data.
+        Inverse of ``_snapshot_client``. CRITICAL: every nested submodel
+        (PkSlot, PotionSlot, BuffCounter, RecoverySettings, ItemCloseSettings,
+        OverlayClose, Point, Slot, Alarm, RoiProfile) is mutated IN PLACE
+        rather than replaced with ``model_copy``. UI widgets all over the
+        app capture these objects by reference (e.g. combat_section's PK
+        sliders bind to ``mock_settings.pk``), so replacing the reference
+        leaves every widget pointing at a stale, detached old copy.
+
+        After this call settings.pk is the SAME PkSlot object as before
+        but with the new client's values; settings.slots is the same
+        dict but cleared + repopulated. Existing widget bindings keep
+        working without rebuild.
         """
-        # Mirror floater_enabled into the top-level (legacy field) so
-        # callers reading settings.floater_enabled see the active tab's
-        # saved state. Per-tab persistence lives on p.floater_enabled.
+        # Plain scalar mirrors — simple assignment is fine.
         self.floater_enabled = bool(p.floater_enabled)
         self.input_backend = p.input_backend
         self.sura_mode = p.sura_mode
         self.capture_window_title = p.capture_window_title
         self.capture_monitor_index = p.capture_monitor_index
-        self.hp_cap = Point(x=p.hp_cap.x, y=p.hp_cap.y)
+        # ROI Point + size — mutate the existing Point in place.
+        self.hp_cap.x, self.hp_cap.y = p.hp_cap.x, p.hp_cap.y
         self.hp_cap_w, self.hp_cap_h = p.hp_cap_w, p.hp_cap_h
-        self.mp_cap = Point(x=p.mp_cap.x, y=p.mp_cap.y)
+        self.mp_cap.x, self.mp_cap.y = p.mp_cap.x, p.mp_cap.y
         self.mp_cap_w, self.mp_cap_h = p.mp_cap_w, p.mp_cap_h
-        self.hp_text_cap = Point(x=p.hp_text_cap.x, y=p.hp_text_cap.y)
+        self.hp_text_cap.x, self.hp_text_cap.y = p.hp_text_cap.x, p.hp_text_cap.y
         self.hp_text_cap_w, self.hp_text_cap_h = p.hp_text_cap_w, p.hp_text_cap_h
-        self.mp_text_cap = Point(x=p.mp_text_cap.x, y=p.mp_text_cap.y)
+        self.mp_text_cap.x, self.mp_text_cap.y = p.mp_text_cap.x, p.mp_text_cap.y
         self.mp_text_cap_w, self.mp_text_cap_h = p.mp_text_cap_w, p.mp_text_cap_h
-        self.potion_text_cap = Point(x=p.potion_text_cap.x, y=p.potion_text_cap.y)
+        self.potion_text_cap.x, self.potion_text_cap.y = p.potion_text_cap.x, p.potion_text_cap.y
         self.potion_text_cap_w, self.potion_text_cap_h = p.potion_text_cap_w, p.potion_text_cap_h
-        self.buff_text_cap = Point(x=p.buff_text_cap.x, y=p.buff_text_cap.y)
+        self.buff_text_cap.x, self.buff_text_cap.y = p.buff_text_cap.x, p.buff_text_cap.y
         self.buff_text_cap_w, self.buff_text_cap_h = p.buff_text_cap_w, p.buff_text_cap_h
-        self.slots = {k: v.model_copy(deep=True) for k, v in p.slots.items()}
-        self.pk = p.pk.model_copy(deep=True)
-        self.potion = p.potion.model_copy(deep=True)
-        self.buff = p.buff.model_copy(deep=True)
-        self.alarms = [a.model_copy(deep=True) for a in p.alarms]
+        # PkSlot / PotionSlot / BuffCounter — copy every field in place.
+        Settings._copy_fields_inplace(self.pk, p.pk)
+        Settings._copy_fields_inplace(self.potion, p.potion)
+        Settings._copy_fields_inplace(self.buff, p.buff)
+        Settings._copy_fields_inplace(self.recovery, p.recovery)
+        Settings._copy_fields_inplace(self.item_close, p.item_close)
+        # Slots dict — clear + repopulate the SAME dict instance so
+        # callers holding the dict reference (slots_section, dashboard
+        # sidebar) see the new entries.
+        self.slots.clear()
+        for k, v in p.slots.items():
+            self.slots[k] = v.model_copy(deep=True)
+        # Alarms list — same idea: same list instance.
+        self.alarms.clear()
+        for a in p.alarms:
+            self.alarms.append(a.model_copy(deep=True))
         self.alarm_popup_enabled = p.alarm_popup_enabled
         self.alarm_auto_close_minutes = p.alarm_auto_close_minutes
         self.alarm_repeat_minutes = p.alarm_repeat_minutes
         self.alarm_sound = p.alarm_sound
         self.alarm_sound_volume = p.alarm_sound_volume
-        self.roi_profiles = {k: v.model_copy(deep=True) for k, v in p.roi_profiles.items()}
+        # ROI profiles dict — same instance.
+        self.roi_profiles.clear()
+        for k, v in p.roi_profiles.items():
+            self.roi_profiles[k] = v.model_copy(deep=True)
         self.active_aspect = p.active_aspect
         self.lock_aspect_profile = p.lock_aspect_profile
-        self.recovery = p.recovery.model_copy(deep=True)
-        self.item_close = p.item_close.model_copy(deep=True)
-        self.overlay_closes = {k: v.model_copy(deep=True) for k, v in p.overlay_closes.items()}
+        # Overlay_closes dict — IN-PLACE mutate each existing OverlayClose
+        # so UI widgets bound to e.g. settings.overlay_closes["pet_whistle"]
+        # see the new threshold/coords without rebuild. New keys are
+        # added; removed keys are deleted.
+        new_keys = set(p.overlay_closes.keys())
+        old_keys = set(self.overlay_closes.keys())
+        for k in old_keys - new_keys:
+            del self.overlay_closes[k]
+        for k, src in p.overlay_closes.items():
+            tgt = self.overlay_closes.get(k)
+            if tgt is None:
+                self.overlay_closes[k] = src.model_copy(deep=True)
+            else:
+                Settings._copy_fields_inplace(tgt, src)
+
+    @staticmethod
+    def _copy_fields_inplace(target, source) -> None:
+        """Copy every model field from source into target, mutating
+        target's existing nested Point objects in place too.
+
+        Used by ``_apply_client`` so widgets that captured a reference
+        to e.g. ``settings.pk.cap`` keep working through tab swaps.
+        """
+        if target is None or source is None:
+            return
+        for fld in type(target).model_fields:
+            src_v = getattr(source, fld, None)
+            tgt_v = getattr(target, fld, None)
+            if isinstance(src_v, Point) and isinstance(tgt_v, Point):
+                tgt_v.x, tgt_v.y = src_v.x, src_v.y
+            elif isinstance(src_v, BaseModel) and isinstance(tgt_v, BaseModel):
+                Settings._copy_fields_inplace(tgt_v, src_v)
+            elif isinstance(src_v, dict) and isinstance(tgt_v, dict):
+                tgt_v.clear()
+                for k, v in src_v.items():
+                    tgt_v[k] = v
+            elif isinstance(src_v, list) and isinstance(tgt_v, list):
+                tgt_v.clear()
+                tgt_v.extend(src_v)
+            else:
+                setattr(target, fld, src_v)
 
     def switch_client(self, client_id: str) -> bool:
         """Switch the active client tab. Returns True if active_client_id
