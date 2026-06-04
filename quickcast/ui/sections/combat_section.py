@@ -346,25 +346,62 @@ def make_combat() -> tuple[QWidget, QWidget]:
     f = QFont(); f.setBold(True); f.setPointSize(18); title.setFont(f)
     v.addWidget(title)
 
-    pk_card = _build_card(mock_settings.pk,     title="PK 대응",        subtitle="전투 감지 시 자동 키 입력",   kind="pk")
-    po_card = _build_card(mock_settings.potion, title="물약 부족 대응", subtitle="! 표시 감지 시 귀환 키 자동 입력", kind="potion")
-    # QGridLayout with equal column stretches is the most reliable way
-    # to enforce true 50/50 — each column gets exactly half the parent
-    # width regardless of the cards' content minimum widths.
+    # PK/Potion cards bind to mock_settings.pk / .potion via object
+    # reference. Settings.switch_client() replaces those objects whole,
+    # so on a client-tab swap we have to rebuild both cards — otherwise
+    # the user's slider edits would mutate the old (now-detached)
+    # ClientProfile's PkSlot, not the active tab's.
     from PySide6.QtWidgets import QGridLayout, QSizePolicy
-    pk_card.setMinimumWidth(0); po_card.setMinimumWidth(0)
-    pk_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-    po_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
     grid_lay = QGridLayout(); grid_lay.setSpacing(14); grid_lay.setContentsMargins(0, 0, 0, 0)
     grid_lay.setColumnStretch(0, 1); grid_lay.setColumnStretch(1, 1)
-    grid_lay.addWidget(pk_card, 0, 0)
-    grid_lay.addWidget(po_card, 0, 1)
+    # Single-element holders so closures can refer to the *current* card.
+    _cards: dict[str, object] = {"pk": None, "po": None}
+
+    def _build_cards() -> None:
+        # Tear down old cards (if any) from the grid.
+        for key in ("pk", "po"):
+            old = _cards.get(key)
+            if old is not None:
+                grid_lay.removeWidget(old)
+                old.deleteLater()
+        # Build fresh cards from the now-active client's data.
+        pkc = _build_card(mock_settings.pk,
+                          title="PK 대응", subtitle="전투 감지 시 자동 키 입력", kind="pk")
+        poc = _build_card(mock_settings.potion,
+                          title="물약 부족 대응", subtitle="! 표시 감지 시 귀환 키 자동 입력", kind="potion")
+        pkc.setMinimumWidth(0); poc.setMinimumWidth(0)
+        pkc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        poc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        grid_lay.addWidget(pkc, 0, 0)
+        grid_lay.addWidget(poc, 0, 1)
+        _cards["pk"] = pkc
+        _cards["po"] = poc
+
+    _build_cards()
     v.addLayout(grid_lay)
 
     # ── Recovery sequence (마을 귀환 → 자동 사냥 복귀) ──
+    # recovery_section.make_recovery_card() also captures mock_settings.recovery
+    # by reference, so rebuild it alongside PK/Potion on client_changed.
     from quickcast.ui.sections.recovery_section import make_recovery_card
-    v.addWidget(make_recovery_card())
+    rec_layout = QVBoxLayout(); rec_layout.setContentsMargins(0, 0, 0, 0)
+    v.addLayout(rec_layout)
     v.addStretch(1)
+
+    def _build_recovery() -> None:
+        while rec_layout.count():
+            it = rec_layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        rec_layout.addWidget(make_recovery_card())
+
+    _build_recovery()
+
+    def _on_client_changed(_cid: str) -> None:
+        _build_cards()
+        _build_recovery()
+    bus.client_changed.connect(_on_client_changed)
 
     # Live score wiring — Dashboard preview broadcasts via bus.live_scores.
     _diag = {"po_last": -1.0}    # closure box for once-only logging
@@ -375,21 +412,25 @@ def make_combat() -> tuple[QWidget, QWidget]:
         po_thr = int(mock_settings.potion.threshold)
         pk_on = bool(getattr(mock_settings.pk, "use", True))
         po_on = bool(getattr(mock_settings.potion, "use", True))
-        if hasattr(pk_card, "_score_lbl"):
+        # Cards are rebuilt on client_changed, so always re-resolve through
+        # the _cards holder instead of capturing a stale Card reference.
+        pkc = _cards.get("pk")
+        poc = _cards.get("po")
+        if pkc is not None and hasattr(pkc, "_score_lbl"):
             if pk_on:
-                pk_card._score_lbl.setText(f"점수 {int(pk_score):,} / 임계 {pk_thr:,}")
+                pkc._score_lbl.setText(f"점수 {int(pk_score):,} / 임계 {pk_thr:,}")
             else:
-                pk_card._score_lbl.setText(f"감지 OFF · 임계 {pk_thr:,}")
-            pk_card._score_lbl.setStyleSheet(
+                pkc._score_lbl.setText(f"감지 OFF · 임계 {pk_thr:,}")
+            pkc._score_lbl.setStyleSheet(
                 f"color:{col_pk}; font-family:{T.type.mono};"
                 f" font-weight:{700 if pk_det else 400};"
             )
-        if hasattr(po_card, "_score_lbl"):
+        if poc is not None and hasattr(poc, "_score_lbl"):
             if po_on:
-                po_card._score_lbl.setText(f"점수 {int(po_score):,} / 임계 {po_thr:,}")
+                poc._score_lbl.setText(f"점수 {int(po_score):,} / 임계 {po_thr:,}")
             else:
-                po_card._score_lbl.setText(f"감지 OFF · 임계 {po_thr:,}")
-            po_card._score_lbl.setStyleSheet(
+                poc._score_lbl.setText(f"감지 OFF · 임계 {po_thr:,}")
+            poc._score_lbl.setStyleSheet(
                 f"color:{col_po}; font-family:{T.type.mono};"
                 f" font-weight:{700 if po_emp else 400};"
             )

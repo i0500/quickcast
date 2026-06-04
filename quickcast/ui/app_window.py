@@ -748,6 +748,14 @@ class AppWindow(AppShell):
         for cid, prof in self.settings.clients.items():
             self._client_tabs.set_enabled_dot(cid, bool(prof.enabled))
 
+        # Sections that bind to per-client sub-models (combat PK/Potion,
+        # recovery, …) rebuild themselves on this signal — their previous
+        # widget bindings point at stale objects after switch_client().
+        try:
+            bus.client_changed.emit(new_cid)
+        except Exception:
+            pass
+
         NotificationCenter.toast(
             f"🔀 {self.settings.clients[new_cid].label} 탭으로 전환됨",
             level="info", duration_ms=2500,

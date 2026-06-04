@@ -76,6 +76,12 @@ class _SignalBus(QObject):
     master_grace_changed = Signal(float)
     # Request switching the active section by id (e.g. "dashboard").
     activate_section = Signal(str)
+    # Multi-client: AppWindow swapped the active tab. Sections that bind
+    # to per-client objects (combat PK/Potion cards, recovery card, …)
+    # subscribe so they can rebuild widgets pointed at the now-stale
+    # ClientProfile sub-models that get whole-object swapped by
+    # Settings._apply_client.
+    client_changed = Signal(str)    # new active client_id
     # Fired by AppWindow when the controller auto-disabled a one-shot
     # toggle (potion.use=False after fire, pk.use=False on non-repeat,
     # slot.use=False on non-repeat). Sections re-read settings and
