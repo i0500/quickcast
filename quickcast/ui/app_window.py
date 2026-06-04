@@ -395,8 +395,14 @@ class AppWindow(AppShell):
     def _wire_controller_to_ui(self) -> None:
         """Forward controller.on_analysis (capture thread) → UI thread.
 
-        Also flips the dashboard preview to "external mode" — its synthetic
-        frame timer is disabled and we feed it real captured frames here.
+        Multi-client: every controller (active + standby) gets the same
+        callback. The callback gates UI rendering on
+        ``cid == active_client_id`` so the dashboard preview / status bar
+        only reflects the visible tab. Standby controllers still process
+        their own frames and fire their own slots — they just don't paint.
+
+        Re-callable on tab swap so a newly-active controller picks up the
+        fresh mailbox bindings.
         """
         from quickcast.core.recognition import FrameAnalysis
         from quickcast.core.capture import Frame as CapFrame
@@ -410,16 +416,29 @@ class AppWindow(AppShell):
         if self._dash_preview is not None:
             self._dash_preview.set_external_mode(True)
 
-        def _on_analysis(analysis: FrameAnalysis, frame: CapFrame) -> None:
-            self._mb.sig.emit(
-                analysis.hp, analysis.mp,
-                float(analysis.pk_score), float(analysis.potion_score),
-                analysis.pk_detected, analysis.potion_empty,
-                float(self.settings.capture_fps),
-            )
-            # Marshal the BGRA frame + analysis into the UI thread.
-            self._frame_mb.sig.emit(frame.image, analysis,
-                                     float(self.settings.capture_fps))
+        def _make_callback(cid: str):
+            def _on_analysis(analysis: FrameAnalysis, frame: CapFrame) -> None:
+                # Only the active-tab controller drives the UI — standby
+                # tabs run their macros silently in the background.
+                if cid != self.settings.active_client_id:
+                    return
+                self._mb.sig.emit(
+                    analysis.hp, analysis.mp,
+                    float(analysis.pk_score), float(analysis.potion_score),
+                    analysis.pk_detected, analysis.potion_empty,
+                    float(self.settings.capture_fps),
+                )
+                self._frame_mb.sig.emit(frame.image, analysis,
+                                         float(self.settings.capture_fps))
+            return _on_analysis
+
+        # Register the same gated callback on EVERY controller we know
+        # about (active + standbys). Without this, only the originally-
+        # active controller would ever paint the UI — switching tabs
+        # would leave the dashboard frozen on the old client's last frame.
+        controllers = self._all_controllers()
+        for cid, ctrl in controllers.items():
+            ctrl.on_analysis = _make_callback(cid)
 
         def _on_ui(hp, mp, pk_s, po_s, pk_d, po_e, fps):
             sb = self.status_bar
@@ -463,7 +482,28 @@ class AppWindow(AppShell):
 
         self._mb.sig.connect(_on_ui, Qt.QueuedConnection)
         self._frame_mb.sig.connect(_on_frame, Qt.QueuedConnection)
-        self.controller.on_analysis = _on_analysis
+        # NOTE: per-controller on_analysis callbacks are assigned above in
+        # the `for cid, ctrl in controllers.items()` loop. The earlier
+        # single-controller `self.controller.on_analysis = _on_analysis`
+        # line was removed — leaving it would clobber the multi-controller
+        # registration with a name that doesn't exist in this scope.
+
+    def _all_controllers(self) -> dict:
+        """Return {cid: MacroController} for every controller this window
+        knows about — the active one plus everything in standby_runtimes.
+        Used by _wire_controller_to_ui to register gated UI callbacks on
+        each so a tab swap doesn't freeze the dashboard.
+        """
+        out = {}
+        if self.controller is not None:
+            cid = getattr(self.controller, "client_id", "") or self.settings.active_client_id
+            out[cid] = self.controller
+        sb = getattr(self.controller, "_standby_runtimes", {}) or {}
+        for cid, rt in sb.items():
+            c = rt.get("controller")
+            if c is not None and cid not in out:
+                out[cid] = c
+        return out
 
     # ───────── activity bar bottom items ─────────
     def _on_section_changed(self, sid: str) -> None:
@@ -578,23 +618,22 @@ class AppWindow(AppShell):
 
     # ───────── client tab switch ─────────
     def _on_client_tab_changed(self, new_cid: str) -> None:
-        """User clicked a different client tab — swap the live runtime.
+        """User clicked a different client tab — promote it to active.
 
-        Phase 3 behaviour:
-          1. Force-OFF master so we never carry a running macro across the
-             swap (different game window, different slot bindings).
-          2. Stop the current controller's capture/control threads.
-          3. Move the current controller into standby_runtimes[old_cid]
-             and pull the new client's controller out of standby into
-             self.controller.
-          4. Settings.switch_client() — top-level fields now mirror new
-             client's profile, so sections reading settings.* see fresh
-             data without per-section rewiring.
-          5. Re-wire controller→UI callbacks and start the new controller.
-          6. Broadcast bus refresh signals so reactive sections redraw.
+        Phase 4 behaviour (true concurrent run):
+          • Both controllers stay running. Tab swap does NOT stop or
+            start anything; it just re-points ``self.controller`` and
+            calls ``settings.switch_client()`` so the UI sections read
+            the new tab's data.
+          • The on_analysis callbacks remain registered on every
+            controller; each one self-gates on the active id, so the
+            dashboard preview/status bar instantly tracks the new tab
+            on its very next frame.
+          • Master switch is preserved (no auto-OFF) — two-client users
+            generally want both tabs to keep running.
 
-        When the requested tab's standby controller is None (capture not
-        configured), the swap is refused and the tab UI snaps back.
+        Refuses the swap when the target tab has no controller (capture
+        unset), to avoid pointing the UI at None.
         """
         if new_cid == self.settings.active_client_id:
             return
@@ -602,76 +641,36 @@ class AppWindow(AppShell):
             logger.warning(f"client-tab: unknown client id '{new_cid}'")
             return
         old_cid = self.settings.active_client_id
-        standby = getattr(self.controller, "_standby_runtimes", {}) or {}
-        new_runtime = standby.get(new_cid)
-        if new_runtime is None or new_runtime.get("controller") is None:
+
+        controllers = self._all_controllers()
+        new_controller = controllers.get(new_cid)
+        if new_controller is None:
             NotificationCenter.toast(
                 f"'{self.settings.clients[new_cid].label}' 캡처 미설정 — "
                 f"먼저 게임창을 지정하세요",
                 level="warning", duration_ms=4000,
             )
-            # Revert tab UI without re-emitting (set_active emits no signal).
             self._client_tabs.set_active(old_cid)
             return
 
-        logger.info(f"🔀 클라 전환: {old_cid} → {new_cid}")
+        logger.info(f"🔀 클라 탭 전환: {old_cid} → {new_cid} (둘 다 가동 중)")
 
-        # 1. Master OFF (safety — slot states + game window differ per tab)
-        try:
-            self.settings.master_switch = False
-            self.controller.set_master_switch(False)
-            self.set_master(False)
-            self._stop_grace_countdown()
-        except Exception:
-            logger.exception("client-tab: master-off failed")
-
-        # 2. Stop the current controller's threads. Capture is preserved
-        # in standby (we'll need it again when the user flips back).
-        old_controller = self.controller
-        try:
-            old_controller.stop()
-        except Exception:
-            logger.exception("client-tab: old controller stop failed")
-
-        # 3. Stash the old controller back into standby_runtimes under its id.
-        standby[old_cid] = {
-            "profile": self.settings.get_profile(old_cid),
-            "capture": old_controller.capture,
-            "slot_manager": old_controller.slot_manager,
-            "postmsg": (old_controller._backends or {}).get("postmessage"),
-            "attachinp": (old_controller._backends or {}).get("attachinput"),
-            "auto_hwnd": int(getattr(old_controller, "_auto_hwnd", 0) or 0),
-            "auto_title": getattr(old_controller, "_auto_title", "") or "",
-            "controller": old_controller,
-        }
-
-        # 4. Switch active client — top-level Settings fields now mirror
-        # new client's profile, so settings.slots / settings.pk / etc.
-        # return the new tab's data.
+        # 1. Active client id swap — sections reading settings.slots /
+        # settings.pk now see the new tab's data on the next read.
         self.settings.switch_client(new_cid)
 
-        # 5. Promote the new controller. Carry the standby dict over so
-        # the next tab swap can find the old controller again.
-        new_controller = new_runtime["controller"]
-        new_controller._standby_runtimes = standby
+        # 2. Point self.controller at the new tab's runtime. Both
+        # controllers stay alive; this just changes which one drives the
+        # status bar / floater / input-backend hot-swap logic.
         self.controller = new_controller
-
-        # Re-wire controller → UI mailbox + status bar.
-        self._wire_controller_to_ui()
-        # Reset capture indicator so the first frame of the new client
-        # flips it back to ON with the new label.
+        # Reset capture indicator so the next frame from the new tab
+        # repaints the status bar with the right label.
         self._capture_seen = False
         self.status_bar.update_capture(False, "대기 중")
 
-        # 6. Start the new controller's threads.
-        try:
-            new_controller.start()
-        except Exception:
-            logger.exception("client-tab: new controller start failed")
-
-        # 7. Broadcast — sections that listen to these signals redraw with
-        # the now-active client's data. floater/HWND-bound code re-attaches
-        # via game_window_found.
+        # 3. Broadcast — sections that listen to these signals redraw
+        # with the now-active client's data; floater re-attaches via
+        # game_window_found if the new tab has a different hwnd.
         try:
             bus.slot_list_changed.emit()
         except Exception:
@@ -688,15 +687,14 @@ class AppWindow(AppShell):
             except Exception:
                 pass
 
-        # 8. Refresh tab visuals (active highlight, ON-dots).
+        # 4. Refresh tab visuals (active highlight, ON-dots).
         self._client_tabs.set_active(new_cid)
         for cid, prof in self.settings.clients.items():
             self._client_tabs.set_enabled_dot(cid, bool(prof.enabled))
 
         NotificationCenter.toast(
-            f"🔀 {self.settings.clients[new_cid].label} 탭으로 전환됨 "
-            f"— Master 다시 켜세요",
-            level="info", duration_ms=3500,
+            f"🔀 {self.settings.clients[new_cid].label} 탭으로 전환됨",
+            level="info", duration_ms=2500,
         )
         bus.settings_dirty.emit()
 

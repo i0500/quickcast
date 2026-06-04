@@ -507,6 +507,38 @@ def run() -> None:
     alarms.on_alarm = _bridged
 
     controller.start()
+    # ── Phase 4: start every standby controller too so two tabs can run
+    # concurrently. Each one has its own capture/recognizer/slot_manager
+    # but reads from the SAME Settings instance via its client_id, so the
+    # active-tab top-level mirror doesn't affect what they evaluate.
+    # ClientProfile.enabled (per-tab) AND settings.master_switch (global)
+    # gate the actual macro fires — capture loops stay alive regardless.
+    for cid, rt in standby_runtimes.items():
+        sb_ctrl = rt.get("controller")
+        if sb_ctrl is None:
+            continue
+        try:
+            sb_ctrl.start()
+            logger.info(f"▶️ [{rt['profile'].label}] 컨트롤러 가동 시작")
+        except Exception:
+            logger.exception(f"standby controller start failed: {cid}")
+    # Warn if two tabs are pointed at the same game window — the user
+    # almost certainly meant to pick a separate client for the second tab.
+    hwnd_to_cid: dict[int, str] = {}
+    for cid, prof in settings.clients.items():
+        h = 0
+        if cid == settings.active_client_id:
+            h = int(getattr(controller, "_auto_hwnd", 0) or 0)
+        else:
+            h = int(standby_runtimes.get(cid, {}).get("auto_hwnd", 0) or 0)
+        if h:
+            if h in hwnd_to_cid:
+                logger.warning(
+                    f"⚠️ 클라 '{cid}'와 '{hwnd_to_cid[h]}'가 동일 HWND 0x{h:X}를 "
+                    f"잡았습니다 — 한 쪽 탭의 캡처를 다른 게임창으로 바꾸세요"
+                )
+            else:
+                hwnd_to_cid[h] = cid
 
     try:
         exit_code = app.exec()

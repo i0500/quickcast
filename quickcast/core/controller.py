@@ -276,6 +276,12 @@ class MacroController:
     def _tick_control(self) -> None:
         if not self.settings.master_switch:
             return
+        # Per-client enable gate — when running two clients concurrently
+        # the user can pause one tab independently via its ClientProfile
+        # toggle without flipping the global master. Read fresh every
+        # tick so the UI toggle takes effect within ~100 ms.
+        if not getattr(self.profile, "enabled", True):
+            return
         if self.state.in_grace_period():
             return
         if getattr(self.state, "recovery_in_progress", False):
@@ -708,10 +714,18 @@ class MacroController:
             logger.exception(f"_fire: send via {backend_name} failed")
 
         if event.tele_use and self.telegram and self.telegram.connected:
+            # Multi-client: prefix the tab label so two clients sharing
+            # one Telegram bot don't blur together in chat history.
+            # Single-client deployments see just the event label (empty
+            # prefix when the tab label is the default "클라1" / blank).
+            tab_label = (getattr(self.profile, "label", "") or "").strip()
+            prefix = f"[{tab_label}] " if tab_label else ""
             if event.snapshot and frame is not None:
-                self.telegram.send_photo(frame.image, caption=f"{event.label} 실행")
+                self.telegram.send_photo(
+                    frame.image, caption=f"{prefix}{event.label} 실행",
+                )
             else:
-                self.telegram.send_text(f"{event.label} 기능을 사용했습니다")
+                self.telegram.send_text(f"{prefix}{event.label} 기능을 사용했습니다")
 
     def _send_burst(self, key: str, count: int, delay: float) -> None:
         self._send_burst_via(self.input, key, count, delay)
