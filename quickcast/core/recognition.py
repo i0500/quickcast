@@ -14,7 +14,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from quickcast.config import PkSlot, PotionSlot, Settings
+from quickcast.config import ClientProfile, PkSlot, PotionSlot, Settings
 from quickcast.core.capture import Frame
 
 TARGETS_DIR = Path(__file__).resolve().parent.parent / "data" / "targets"
@@ -399,11 +399,11 @@ class Recognizer:
         self._pk_target = self._load_bgra(pk_target_path)
         self._potion_target = self._load_bgra(potion_target_path)
         # Top-left buff-count badge ("75" circle) template. None when
-        # the file isn't shipped — settings.buff.enabled gracefully
+        # the file isn't shipped — profile.buff.enabled gracefully
         # no-ops in that case.
         self._buff_target = self._load_bgra(buff_target_path)
         # Overlay templates — keyed by overlay id (matches the keys in
-        # settings.overlay_closes). Any file under data/targets/ whose
+        # profile.overlay_closes). Any file under data/targets/ whose
         # stem is not pk/potion/buff_full is treated as an overlay
         # template; the user can drop a new png and a matching settings
         # entry to extend without code changes.
@@ -538,9 +538,23 @@ class Recognizer:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
         return img
 
-    def analyze(self, frame: Frame, settings: Settings) -> FrameAnalysis:
-        sura_offset_hp = 5 if settings.sura_mode else 0
-        sura_offset_mp = 6 if settings.sura_mode else 0
+    def analyze(
+        self,
+        frame: Frame,
+        settings: Settings,
+        profile: ClientProfile | None = None,
+    ) -> FrameAnalysis:
+        """Run all detectors for one frame.
+
+        ``profile`` lets a per-client controller pass its own ClientProfile
+        so each tab's recognizer reads only its own ROIs/templates. When
+        omitted (legacy callers), the active client's profile is used —
+        same data the top-level settings fields mirror.
+        """
+        if profile is None:
+            profile = settings.get_profile()
+        sura_offset_hp = 5 if profile.sura_mode else 0
+        sura_offset_mp = 6 if profile.sura_mode else 0
         scales = _resolve_scales(settings.scale_steps)
 
         # PK / Potion: ROI is a *search region* — the user draws a box
@@ -552,31 +566,31 @@ class Recognizer:
         from quickcast.utils.logger import logger
         if self._pk_target is not None:
             th, tw = self._pk_target.shape[:2]
-            if settings.pk.cap_w < tw or settings.pk.cap_h < th:
+            if profile.pk.cap_w < tw or profile.pk.cap_h < th:
                 if not _ROI_FIX_REPORTED.get("pk"):
                     logger.info(
                         f"🔧 PK 박스가 템플릿보다 작아 최소 크기로 확장: "
-                        f"{settings.pk.cap_w}×{settings.pk.cap_h} → "
-                        f"{max(settings.pk.cap_w, tw)}×{max(settings.pk.cap_h, th)}"
+                        f"{profile.pk.cap_w}×{profile.pk.cap_h} → "
+                        f"{max(profile.pk.cap_w, tw)}×{max(profile.pk.cap_h, th)}"
                     )
                     _ROI_FIX_REPORTED["pk"] = True
-                settings.pk.cap_w = max(int(settings.pk.cap_w), int(tw))
-                settings.pk.cap_h = max(int(settings.pk.cap_h), int(th))
+                profile.pk.cap_w = max(int(profile.pk.cap_w), int(tw))
+                profile.pk.cap_h = max(int(profile.pk.cap_h), int(th))
         if self._potion_target is not None:
             th, tw = self._potion_target.shape[:2]
-            if settings.potion.cap_w < tw or settings.potion.cap_h < th:
+            if profile.potion.cap_w < tw or profile.potion.cap_h < th:
                 if not _ROI_FIX_REPORTED.get("potion"):
                     logger.info(
                         f"🔧 물약 박스가 템플릿보다 작아 최소 크기로 확장: "
-                        f"{settings.potion.cap_w}×{settings.potion.cap_h} → "
-                        f"{max(settings.potion.cap_w, tw)}×{max(settings.potion.cap_h, th)}"
+                        f"{profile.potion.cap_w}×{profile.potion.cap_h} → "
+                        f"{max(profile.potion.cap_w, tw)}×{max(profile.potion.cap_h, th)}"
                     )
                     _ROI_FIX_REPORTED["potion"] = True
-                settings.potion.cap_w = max(int(settings.potion.cap_w), int(tw))
-                settings.potion.cap_h = max(int(settings.potion.cap_h), int(th))
+                profile.potion.cap_w = max(int(profile.potion.cap_w), int(tw))
+                profile.potion.cap_h = max(int(profile.potion.cap_h), int(th))
 
-        hp_roi = frame.crop(settings.hp_cap, settings.hp_cap_w, settings.hp_cap_h, sura_offset_hp)
-        mp_roi = frame.crop(settings.mp_cap, settings.mp_cap_w, settings.mp_cap_h, sura_offset_mp)
+        hp_roi = frame.crop(profile.hp_cap, profile.hp_cap_w, profile.hp_cap_h, sura_offset_hp)
+        mp_roi = frame.crop(profile.mp_cap, profile.mp_cap_w, profile.mp_cap_h, sura_offset_mp)
 
         # OCR path — only when explicitly enabled AND templates exist.
         # Falls back to the legacy colour/template detectors when any
@@ -604,23 +618,23 @@ class Recognizer:
                 v = self._digit_threshold.get(dom)
                 return v if v is not None else global_thr
             # HP
-            if settings.hp_text_cap_w > 0 and settings.hp_text_cap_h > 0:
+            if profile.hp_text_cap_w > 0 and profile.hp_text_cap_h > 0:
                 tpl, canon = self._templates_for("hp")
                 if tpl:
                     hp_text_roi = frame.crop(
-                        settings.hp_text_cap,
-                        settings.hp_text_cap_w, settings.hp_text_cap_h,
+                        profile.hp_text_cap,
+                        profile.hp_text_cap_w, profile.hp_text_cap_h,
                     )
                     r = recognise(hp_text_roi, tpl, threshold=_thr_for("hp"),
                                     canonical=canon)
                     ocr_hp = hp_percentage(r)
             # MP
-            if settings.mp_text_cap_w > 0 and settings.mp_text_cap_h > 0:
+            if profile.mp_text_cap_w > 0 and profile.mp_text_cap_h > 0:
                 tpl, canon = self._templates_for("mp")
                 if tpl:
                     mp_text_roi = frame.crop(
-                        settings.mp_text_cap,
-                        settings.mp_text_cap_w, settings.mp_text_cap_h,
+                        profile.mp_text_cap,
+                        profile.mp_text_cap_w, profile.mp_text_cap_h,
                     )
                     r = recognise(mp_text_roi, tpl, threshold=_thr_for("mp"),
                                     canonical=canon)
@@ -629,14 +643,14 @@ class Recognizer:
             # Confidence threshold lowered to 0.45 (was 0.55) because a
             # single-glyph counter is harder to match cleanly than a
             # full "cur/max" string, and 0.55 was rejecting valid hits.
-            if settings.potion_text_cap_w > 0 and settings.potion_text_cap_h > 0:
+            if profile.potion_text_cap_w > 0 and profile.potion_text_cap_h > 0:
                 tpl_po, canon_po = self._templates_for("potion")
                 if not tpl_po:
                     r = None
                 else:
                     po_text_roi = frame.crop(
-                        settings.potion_text_cap,
-                        settings.potion_text_cap_w, settings.potion_text_cap_h,
+                        profile.potion_text_cap,
+                        profile.potion_text_cap_w, profile.potion_text_cap_h,
                     )
                     r = recognise(po_text_roi, tpl_po, threshold=_thr_for("potion"),
                                     canonical=canon_po)
@@ -695,29 +709,29 @@ class Recognizer:
         # showing "감지 OFF" instead.
         pk_match_xy: tuple[int, int] = (-1, -1)
         pk_match_scale = 1.0
-        if settings.pk.use and self._pk_target is not None:
-            pk_roi = frame.crop(settings.pk.cap, settings.pk.cap_w, settings.pk.cap_h)
+        if profile.pk.use and self._pk_target is not None:
+            pk_roi = frame.crop(profile.pk.cap, profile.pk.cap_w, profile.pk.cap_h)
             pk_score, local_xy, pk_match_scale = _template_search(
                 pk_roi, self._pk_target,
                 scale_legacy=5_000_000.0, scales=scales, _kind="pk",
             )
             if local_xy != (-1, -1):
-                pk_match_xy = (settings.pk.cap.x + local_xy[0],
-                               settings.pk.cap.y + local_xy[1])
+                pk_match_xy = (profile.pk.cap.x + local_xy[0],
+                               profile.pk.cap.y + local_xy[1])
         else:
             pk_score = 0.0
 
         potion_match_xy: tuple[int, int] = (-1, -1)
         potion_match_scale = 1.0
-        if settings.potion.use and self._potion_target is not None:
-            potion_roi = frame.crop(settings.potion.cap, settings.potion.cap_w, settings.potion.cap_h)
+        if profile.potion.use and self._potion_target is not None:
+            potion_roi = frame.crop(profile.potion.cap, profile.potion.cap_w, profile.potion.cap_h)
             potion_score, local_xy, potion_match_scale = _template_search(
                 potion_roi, self._potion_target,
                 scale_legacy=250_000.0, scales=scales, _kind="potion",
             )
             if local_xy != (-1, -1):
-                potion_match_xy = (settings.potion.cap.x + local_xy[0],
-                                    settings.potion.cap.y + local_xy[1])
+                potion_match_xy = (profile.potion.cap.x + local_xy[0],
+                                    profile.potion.cap.y + local_xy[1])
         else:
             potion_score = 0.0
 
@@ -739,7 +753,7 @@ class Recognizer:
                 self._buff_history.clear()
                 self._buff_smoothed = None
         if buff_cfg is not None and bool(getattr(buff_cfg, "enabled", False)) \
-                and settings.buff_text_cap_w > 0 and settings.buff_text_cap_h > 0:
+                and profile.buff_text_cap_w > 0 and profile.buff_text_cap_h > 0:
             tpl, canon = self._templates_for("buff")
             if tpl:
                 from quickcast.core.ocr import recognise
@@ -751,8 +765,8 @@ class Recognizer:
                     g = int(getattr(settings, "ocr_threshold", 0) or 0)
                     buff_thr = g if g > 0 else None
                 buff_roi = frame.crop(
-                    settings.buff_text_cap,
-                    settings.buff_text_cap_w, settings.buff_text_cap_h,
+                    profile.buff_text_cap,
+                    profile.buff_text_cap_w, profile.buff_text_cap_h,
                 )
                 # ── 2× upsample before OCR ──
                 # The buff badge is small (≈28×24 in the normalised frame)
@@ -831,7 +845,7 @@ class Recognizer:
             final_potion_empty = bool(ocr_potion_empty)
             final_potion_score = ocr_potion_score
         else:
-            final_potion_empty = round(potion_score) >= settings.potion.threshold
+            final_potion_empty = round(potion_score) >= profile.potion.threshold
             final_potion_score = potion_score
 
         # ── Overlay close detection ────────────────────────────────
@@ -873,7 +887,7 @@ class Recognizer:
         return FrameAnalysis(
             hp=final_hp,
             mp=final_mp,
-            pk_detected=round(pk_score) >= settings.pk.threshold,
+            pk_detected=round(pk_score) >= profile.pk.threshold,
             pk_score=pk_score,
             potion_empty=final_potion_empty,
             potion_score=final_potion_score,

@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from quickcast.config import PkSlot, PotionSlot, Settings, Slot
+from quickcast.config import ClientProfile, PkSlot, PotionSlot, Settings, Slot
 from quickcast.core.recognition import FrameAnalysis
 from quickcast.utils.logger import logger
 from quickcast.utils.timer import Cooldown
@@ -48,14 +48,24 @@ class SlotManager:
         self,
         settings: Settings,
         analysis: FrameAnalysis,
+        profile: ClientProfile | None = None,
     ) -> list[FireEvent]:
+        """Evaluate slots against `analysis` and return any fires.
+
+        ``profile`` lets a per-client controller pass its own ClientProfile
+        so two MacroController instances driving different tabs don't
+        cross-fire each other's slots. When omitted (legacy callers), the
+        active client's profile is used.
+        """
+        if profile is None:
+            profile = settings.get_profile()
         events: list[FireEvent] = []
         now = time.monotonic()
 
         # ───── ordinary slots (sorted: 1..9, 0, then 11+) ─────
         active_ids: set[str] = set()
-        for sid in self._slot_iteration_order(settings.slots):
-            slot = settings.slots[sid]
+        for sid in self._slot_iteration_order(profile.slots):
+            slot = profile.slots[sid]
             # Slot skip reasons go to DEBUG so the dashboard isn't
             # flooded; visible to advanced users via the log file.
             if not slot.use:
@@ -101,7 +111,7 @@ class SlotManager:
                 )
 
         # ───── PK slot ─────
-        pk = settings.pk
+        pk = profile.pk
         pk_active = (
             pk.use and analysis.pk_detected
             and (pk.hp.min <= analysis.hp <= pk.hp.max)
@@ -136,7 +146,7 @@ class SlotManager:
                         )
 
         # ───── Potion-empty slot (one-shot regardless of repeat) ─────
-        potion = settings.potion
+        potion = profile.potion
         potion_active = (
             potion.use and analysis.potion_empty
             and (potion.hp.min <= analysis.hp <= potion.hp.max)

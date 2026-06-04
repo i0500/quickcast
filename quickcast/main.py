@@ -274,6 +274,7 @@ def run() -> None:
         input_backend=active_input,
         telegram=telegram,
         on_slot_state_changed=_emit_slot_refresh,
+        client_id=settings.active_client_id,
     )
     # Stash all backends so the UI can hot-swap them
     controller._backends = {
@@ -337,6 +338,38 @@ def run() -> None:
             sb_title = sb_cap.label
             sb_postmsg.set_target(sb_hwnd, sb_title)
             sb_attach.set_target(sb_hwnd, sb_title)
+
+        # Build a controller for this client if we have a capture.
+        # NOT started yet — Phase 3 will swap which one is "active" when
+        # the user clicks a tab, Phase 4 starts both for concurrent run.
+        # The recognizer is SHARED across clients (template targets are
+        # global per-game, no per-tab calibration needed). The Arduino
+        # backend is shared too (single physical device).
+        sb_controller = None
+        if sb_cap is not None:
+            sb_pick_input = sb_postmsg
+            if profile.input_backend == "attachinput":
+                sb_pick_input = sb_attach
+            elif profile.input_backend == "arduino":
+                sb_pick_input = arduino
+            sb_controller = MacroController(
+                settings=settings,
+                capture=sb_cap,
+                recognizer=recognizer,
+                slot_manager=sb_sm,
+                input_backend=sb_pick_input,
+                telegram=telegram,
+                on_slot_state_changed=_emit_slot_refresh,
+                client_id=cid,
+            )
+            sb_controller._backends = {
+                "arduino": arduino,
+                "postmessage": sb_postmsg,
+                "attachinput": sb_attach,
+            }
+            sb_controller._auto_hwnd = sb_hwnd
+            sb_controller._auto_title = sb_title
+
         standby_runtimes[cid] = {
             "profile": profile,
             "capture": sb_cap,
@@ -345,14 +378,17 @@ def run() -> None:
             "attachinp": sb_attach,
             "auto_hwnd": sb_hwnd,
             "auto_title": sb_title,
+            "controller": sb_controller,
         }
         logger.info(
             f"📋 [{profile.label}] 대기 런타임 준비됨 "
-            f"(capture={'OK' if sb_cap else '없음'}, hwnd={sb_hwnd or '미설정'})"
+            f"(capture={'OK' if sb_cap else '없음'}, "
+            f"controller={'OK' if sb_controller else '없음'}, "
+            f"hwnd={sb_hwnd or '미설정'})"
         )
-    # Hand-off slot for Phase 2B/3 — AppWindow currently doesn't consume
-    # this, but having a single dict makes the controller-duplication
-    # work in 2B a drop-in: just iterate and start each runtime.
+    # Hand-off slot for Phase 3 — AppWindow doesn't directly consume this
+    # yet, but Phase 3's tab-switch hook reads standby_runtimes[cid] to
+    # know which capture/controller to flip live when the user clicks.
     controller._standby_runtimes = standby_runtimes
 
     # Alarm scheduler — fires both Telegram and (later) tray toast.
@@ -476,6 +512,21 @@ def run() -> None:
         exit_code = app.exec()
     finally:
         controller.stop()
+        # Stop any standby controllers (no-op if start() was never
+        # called, but defensive for Phase 4 when both run concurrently).
+        for cid, rt in (getattr(controller, "_standby_runtimes", {}) or {}).items():
+            sb_ctrl = rt.get("controller")
+            if sb_ctrl is not None:
+                try:
+                    sb_ctrl.stop()
+                except Exception:
+                    logger.exception(f"standby controller stop failed: {cid}")
+            sb_cap = rt.get("capture")
+            if sb_cap is not None:
+                try:
+                    sb_cap.close()
+                except Exception:
+                    logger.exception(f"standby capture close failed: {cid}")
         alarms.stop()
         telegram.close()
         arduino.close()

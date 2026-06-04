@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from quickcast.config import Settings
+from quickcast.config import ClientProfile, Settings
 from quickcast.core.capture import Frame, ScreenCapture
 from quickcast.core.recognition import FrameAnalysis, Recognizer
 from quickcast.core.state import RuntimeState
@@ -37,8 +37,15 @@ class MacroController:
         telegram: Optional[TelegramNotifier] = None,
         on_analysis: Optional[AnalysisCallback] = None,
         on_slot_state_changed: Optional[Callable[[], None]] = None,
+        client_id: str = "",
     ) -> None:
         self.settings = settings
+        # Which client tab this controller is bound to. Empty string ⇒
+        # legacy single-client mode (falls back to active). Two controllers
+        # sharing the same Settings instance read DIFFERENT ClientProfile
+        # data via this id, so two tabs can run in parallel without
+        # cross-firing each other's slots / capture / overlays.
+        self.client_id = client_id or settings.active_client_id
         self.capture = capture
         self.recognizer = recognizer
         self.slot_manager = slot_manager
@@ -77,6 +84,28 @@ class MacroController:
         # (full count restored) or recovery sequence fires. None means
         # "badge currently matches, nothing pending".
         self._town_idle_started_at: Optional[float] = None
+
+    # ───────── client-scoped data ─────────
+    @property
+    def profile(self) -> ClientProfile:
+        """Return the ClientProfile this controller is bound to.
+
+        Resolved every call (instead of cached at __init__) so that a
+        future tab-rename or programmatic profile swap is picked up
+        without restarting the controller. Cost is one dict lookup per
+        frame — negligible at our 10-30 fps cadence.
+        """
+        return self.settings.get_profile(self.client_id)
+
+    @property
+    def is_active_tab(self) -> bool:
+        """True when this controller drives the currently-displayed tab.
+
+        Used to gate operations that mutate the shared top-level mirror
+        fields on Settings (e.g. sync_aspect rewrites settings.hp_cap)
+        so a standby controller never overwrites the active tab's ROIs.
+        """
+        return self.client_id == self.settings.active_client_id
 
     # ───────── lifecycle ─────────
     def start(self) -> None:
@@ -147,7 +176,7 @@ class MacroController:
                 # monitor) and 16:10 / 3:2 (typical laptop). Cheap: a
                 # dict lookup + maybe one Pydantic copy per ratio flip.
                 self._maybe_sync_aspect()
-                analysis = self.recognizer.analyze(frame, self.settings)
+                analysis = self.recognizer.analyze(frame, self.settings, self.profile)
                 with self._latest_lock:
                     self._latest_frame = frame
                     self._latest_analysis = analysis
@@ -201,7 +230,13 @@ class MacroController:
         source aspect, so a single ROI calibration works across all
         source aspects without auto-swapping.
         """
-        if getattr(self.settings, "lock_aspect_profile", True):
+        if getattr(self.profile, "lock_aspect_profile", True):
+            return
+        # Only the active-tab controller may rewrite Settings.sync_aspect()
+        # — sync_aspect mutates the top-level mirror fields which represent
+        # the *active* client. A standby controller calling it would
+        # silently overwrite the other tab's ROIs.
+        if not self.is_active_tab:
             return
         size = getattr(self.capture, "last_source_size", None)
         if not size or size[0] <= 0 or size[1] <= 0:
@@ -287,12 +322,14 @@ class MacroController:
         # Snapshot use-state so we can detect SlotManager auto-disabling
         # any one-shot toggle this tick (potion fires, non-repeat slots
         # / pk firing) and notify the UI to refresh its toggles.
-        s = self.settings
-        prev = (s.pk.use, s.potion.use,
-                {sid: sl.use for sid, sl in s.slots.items()})
+        # Reads from this controller's ClientProfile so two tabs don't
+        # observe each other's slot state flips.
+        p = self.profile
+        prev = (p.pk.use, p.potion.use,
+                {sid: sl.use for sid, sl in p.slots.items()})
 
         # Fire any matching slot events first.
-        events = self.slot_manager.evaluate(self.settings, analysis)
+        events = self.slot_manager.evaluate(self.settings, analysis, p)
         fired_ids: list[str] = []
         for event in events:
             self._fire(event, frame)
@@ -300,8 +337,8 @@ class MacroController:
 
         if events:
             # Compare snapshot to detect any toggle that flipped True→False.
-            cur_slots = {sid: sl.use for sid, sl in s.slots.items()}
-            if (prev[0] != s.pk.use or prev[1] != s.potion.use
+            cur_slots = {sid: sl.use for sid, sl in p.slots.items()}
+            if (prev[0] != p.pk.use or prev[1] != p.potion.use
                     or any(prev[2].get(k) != cur_slots.get(k) for k in cur_slots)):
                 if self.on_slot_state_changed:
                     try:
@@ -333,7 +370,7 @@ class MacroController:
         per-overlay cooldown is a secondary safeguard for popups that
         re-appear quickly.
         """
-        cfg = getattr(self.settings, "overlay_closes", None) or {}
+        cfg = getattr(self.profile, "overlay_closes", None) or {}
         matches = getattr(analysis, "overlay_matches", None) or {}
         if not cfg or not matches:
             return
@@ -378,7 +415,7 @@ class MacroController:
                 logger.exception(f"overlay-close[{ov_id}]: send_key failed")
 
     def _maybe_item_close_click(self) -> None:
-        ic = getattr(self.settings, "item_close", None)
+        ic = getattr(self.profile, "item_close", None)
         if ic is None or not getattr(ic, "enabled", False):
             return
         # Coordinates of 0×0 means "not set yet" — don't click random
@@ -404,7 +441,7 @@ class MacroController:
           - the "테스트 클릭" button in the capture section, so the
             user can verify the coordinate without waiting 5 minutes.
         """
-        ic = getattr(self.settings, "item_close", None)
+        ic = getattr(self.profile, "item_close", None)
         if ic is None:
             return
         hwnd = int(getattr(self, "_auto_hwnd", 0) or 0)
@@ -434,7 +471,7 @@ class MacroController:
 
     def _maybe_trigger_recovery(self, analysis: FrameAnalysis,
                                   fired_slot_ids: Optional[list] = None) -> None:
-        rec = getattr(self.settings, "recovery", None)
+        rec = getattr(self.profile, "recovery", None)
         if rec is None or not rec.enabled or not rec.steps:
             return
         # Edge-triggered latch — the recovery_handled set tracks which
