@@ -590,6 +590,55 @@ def _sidebar_quick_toggle(label: str, target_obj, attr: str) -> QWidget:
     return row
 
 
+def _sidebar_overlay_master_toggle(label: str) -> QWidget:
+    """오버레이 자동닫기 마스터 토글 — settings.overlay_closes[*].enabled를
+    일괄 ON/OFF. dict 내부 OverlayClose 객체는 in-place mutate로 reference
+    유지되므로 capture_section의 개별 오버레이 카드 토글도 즉시 동기화됨.
+    """
+    from quickcast.ui.design.signals import bus as _bus
+    from quickcast.ui.sections._mock_state import mock_settings as _ms
+    row = QWidget()
+    h = QHBoxLayout(row); h.setContentsMargins(12, 4, 12, 4); h.setSpacing(8)
+    lbl = QLabel(label)
+    reactive(lbl, lambda: f"color:{T.palette.text_primary}; font-size:13px;")
+    sw = IOSToggle(width=36, height=18)
+
+    def _is_all_on() -> bool:
+        ovc = getattr(_ms, "overlay_closes", None) or {}
+        if not ovc:
+            return False
+        return all(bool(getattr(v, "enabled", False)) for v in ovc.values())
+
+    sw.set_state(_is_all_on(), animate=False)
+
+    def _on(on: bool) -> None:
+        ovc = getattr(_ms, "overlay_closes", None) or {}
+        for v in ovc.values():
+            try:
+                v.enabled = bool(on)
+            except Exception:
+                pass
+        _bus.settings_dirty.emit()
+    sw.toggled.connect(_on)
+
+    def _resync() -> None:
+        try:
+            cur = _is_all_on()
+            if sw.is_on() != cur:
+                sw.set_state(cur, animate=True)
+        except RuntimeError:
+            try:
+                _bus.slot_state_refresh.disconnect(_resync)
+                _bus.settings_dirty.disconnect(_resync)
+            except Exception:
+                pass
+    _bus.slot_state_refresh.connect(_resync)
+    _bus.settings_dirty.connect(_resync)
+
+    h.addWidget(lbl); h.addStretch(1); h.addWidget(sw)
+    return row
+
+
 def make_dashboard() -> tuple[QWidget, QWidget]:
     # Local imports — `bus` is referenced repeatedly below for the
     # live-rebuild signals (slot list, alarm list, log, picks).
@@ -611,6 +660,8 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
     sv.addWidget(_sidebar_quick_toggle("PK 대응",  _ms.pk,       "use"))
     sv.addWidget(_sidebar_quick_toggle("물약 대응", _ms.potion,   "use"))
     sv.addWidget(_sidebar_quick_toggle("사냥 복귀", _ms.recovery, "enabled"))
+    sv.addWidget(_sidebar_overlay_master_toggle("오버레이 닫기"))
+    sv.addWidget(_sidebar_quick_toggle("버프 카운트", _ms.buff,   "enabled"))
 
     sk_head = QLabel("스킬 토글")
     reactive(sk_head, lambda: (
