@@ -429,6 +429,15 @@ class InteractivePreview(QWidget):
             defs.extend(OCR_ROI_DEFS)
         else:
             defs = list(ROI_DEFS)
+        # Hide PK / potion ROI boxes when their use-toggle is OFF — they're
+        # detection regions, so leaving them visible while the detector is
+        # disabled is just clutter (and misleading on a per-tab swap).
+        pk = getattr(self.settings, "pk", None)
+        if pk is None or not getattr(pk, "use", False):
+            defs = [d for d in defs if d[0] != "pk"]
+        po = getattr(self.settings, "potion", None)
+        if po is None or not getattr(po, "use", False):
+            defs = [d for d in defs if d[0] != "potion"]
         # Buff text ROI only shows when the feature is enabled (avoids
         # cluttering the preview for users who don't use 마을 대기).
         buff = getattr(self.settings, "buff", None)
