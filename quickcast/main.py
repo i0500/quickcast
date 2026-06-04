@@ -548,9 +548,12 @@ def run() -> None:
             )
         return _h
 
-    # Build one FloatingSwitch per client.
+    # Build one FloatingSwitch per client. `client_id` makes the floater
+    # read its expand panel data from settings.clients[cid] directly —
+    # NOT the top-level active mirror — so two floaters never share the
+    # same sub-toggle states.
     for _cid, _prof in settings.clients.items():
-        fl = FloatingSwitch()
+        fl = FloatingSwitch(client_id=_cid)
         fl.attach_settings(settings)
         # Per-client toggle handler — does NOT touch master_switch.
         fl.toggled.connect(_make_floater_toggle_handler(_cid))

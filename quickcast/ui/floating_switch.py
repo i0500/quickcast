@@ -116,13 +116,20 @@ class FloatingSwitch(QWidget):
 
     toggled = Signal(bool)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, client_id: str = "") -> None:
         super().__init__(parent)
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
             | Qt.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
+
+        # Multi-client: which tab this floater belongs to. Empty = legacy
+        # single-client (reads from the top-level mock_settings mirror).
+        # When set, _client_profile() returns settings.clients[client_id]
+        # so the expand panel + write-backs touch ONLY that tab's data —
+        # no cross-tab leak on active-tab swaps.
+        self._client_id: str = client_id or ""
 
         self._target_hwnd: Optional[int] = None
         self._user_offset: Optional[QPoint] = None
@@ -288,9 +295,33 @@ class FloatingSwitch(QWidget):
                 )
         self._track()
 
+    def _client_profile(self):
+        """Return THIS floater's data source.
+
+        Per-tab mode (client_id set): always returns the live
+        ``settings.clients[client_id]`` ClientProfile. switch_client()
+        replaces that dict entry whole-object, so we re-resolve every
+        call — never cache.
+
+        Legacy single-tab mode (no client_id): falls back to the
+        top-level mock_settings mirror, preserving old behaviour for
+        single-instance deployments.
+        """
+        s = self._settings
+        if s is None:
+            return None
+        if self._client_id:
+            try:
+                prof = s.clients.get(self._client_id)
+                if prof is not None:
+                    return prof
+            except Exception:
+                pass
+        return s
+
     def _collect_use_state(self) -> dict[str, bool]:
         """Snapshot the current use-flag of each tracked item."""
-        s = self._settings
+        s = self._client_profile()
         out: dict[str, bool] = {}
         if s is None:
             return out
@@ -340,7 +371,7 @@ class FloatingSwitch(QWidget):
             if w is not None:
                 w.setParent(None)
 
-        s = self._settings
+        s = self._client_profile()
         if s is None:
             return
 
@@ -407,39 +438,37 @@ class FloatingSwitch(QWidget):
         h.addWidget(tgl, 0)
         self._panel_layout.addWidget(row)
 
-    # ───────── settings writes ─────────
+    # ───────── settings writes (scoped to this floater's client) ─────────
     def _set_pk(self, on: bool) -> None:
-        if self._settings is None:
+        p = self._client_profile()
+        if p is None or bool(p.pk.use) == on:
             return
-        if bool(self._settings.pk.use) == on:
-            return
-        self._settings.pk.use = on
+        p.pk.use = on
         self._broadcast_change()
 
     def _set_potion(self, on: bool) -> None:
-        if self._settings is None:
+        p = self._client_profile()
+        if p is None or bool(p.potion.use) == on:
             return
-        if bool(self._settings.potion.use) == on:
-            return
-        self._settings.potion.use = on
+        p.potion.use = on
         self._broadcast_change()
 
     def _set_recovery(self, on: bool) -> None:
-        s = self._settings
-        if s is None or getattr(s, "recovery", None) is None:
+        p = self._client_profile()
+        if p is None or getattr(p, "recovery", None) is None:
             return
-        if bool(s.recovery.enabled) == on:
+        if bool(p.recovery.enabled) == on:
             return
-        s.recovery.enabled = on
+        p.recovery.enabled = on
         self._broadcast_change()
 
     def _set_slot(self, sid: str, on: bool) -> None:
-        s = self._settings
-        if s is None or sid not in s.slots:
+        p = self._client_profile()
+        if p is None or sid not in p.slots:
             return
-        if bool(s.slots[sid].use) == on:
+        if bool(p.slots[sid].use) == on:
             return
-        s.slots[sid].use = on
+        p.slots[sid].use = on
         self._broadcast_change()
 
     def _broadcast_change(self) -> None:
