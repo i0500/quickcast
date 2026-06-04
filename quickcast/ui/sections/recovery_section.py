@@ -243,6 +243,19 @@ def make_recovery_card() -> QWidget:
         )
 
     def _rebuild_slot_trigger_btns() -> None:
+        # Guard against rebuilt-card lifecycle: combat_section rebuilds
+        # the recovery widget on client_changed, so this closure's
+        # btns_row may belong to a deleteLater'd layout by the time the
+        # next slot_list_changed fires. Bail before touching dead C++.
+        try:
+            _probe = btns_row.count()
+        except RuntimeError:
+            try:
+                bus.slot_list_changed.disconnect(_rebuild_slot_trigger_btns)
+            except Exception:
+                pass
+            return
+
         # Drop deleted slot ids from trigger_slot_ids so they don't
         # silently keep firing recovery against a slot that no longer
         # exists.

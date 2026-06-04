@@ -278,9 +278,20 @@ def _bind_ios(target_obj, attr: str, label: str) -> QHBoxLayout:
     sw.toggled.connect(_on)
 
     def _resync() -> None:
-        cur = bool(getattr(target_obj, attr))
-        if sw.is_on() != cur:
-            sw.set_state(cur, animate=True)
+        # Combat cards get whole-card rebuild on client tab swap, so the
+        # IOSToggle this closure captured may have been deleteLater'd by
+        # the time slot_state_refresh fires. Guard against the C++ side
+        # already being gone — Python-only signal cleanup happens lazily.
+        try:
+            cur = bool(getattr(target_obj, attr))
+            if sw.is_on() != cur:
+                sw.set_state(cur, animate=True)
+        except RuntimeError:
+            # "Internal C++ object already deleted" — drop the connection.
+            try:
+                bus.slot_state_refresh.disconnect(_resync)
+            except Exception:
+                pass
     bus.slot_state_refresh.connect(_resync)
 
     row.addWidget(lbl); row.addWidget(sw)

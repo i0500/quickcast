@@ -142,6 +142,15 @@ def wire_persistence(save_now) -> None:
             bus.alarm_list_changed.emit()
         except Exception:
             pass
+        # _sidebar_quick_toggle (대시보드 사이드바의 PK 대응 / 물약 대응 /
+        # 사냥복귀 토글)은 slot_state_refresh 신호로 visual을 새로
+        # 읽어옴. in-place mutate된 PkSlot.use / PotionSlot.use /
+        # RecoverySettings.enabled가 새 클라 값이라도 토글 visual은
+        # set_state로 직접 갱신해줘야 보임 → 이 emit이 그 역할.
+        try:
+            bus.slot_state_refresh.emit()
+        except Exception:
+            pass
 
     bus.client_changed.connect(_reseed_on_client_change)
 

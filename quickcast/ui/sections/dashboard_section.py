@@ -566,10 +566,25 @@ def _sidebar_quick_toggle(label: str, target_obj, attr: str) -> QWidget:
     sw.toggled.connect(_on)
 
     def _resync() -> None:
-        cur = bool(getattr(target_obj, attr))
-        if sw.is_on() != cur:
-            sw.set_state(cur, animate=True)
+        # Guard against deleted toggle (this widget can be torn down on
+        # tab swap if the sidebar gets rebuilt) before touching its C++
+        # side — RuntimeError = libshiboken says the object is gone.
+        try:
+            cur = bool(getattr(target_obj, attr))
+            if sw.is_on() != cur:
+                sw.set_state(cur, animate=True)
+        except RuntimeError:
+            try:
+                _bus.slot_state_refresh.disconnect(_resync)
+                _bus.settings_dirty.disconnect(_resync)
+            except Exception:
+                pass
     _bus.slot_state_refresh.connect(_resync)
+    # ALSO listen to settings_dirty — combat tab's PK/Potion 사용 토글
+    # writes settings_dirty (without slot_state_refresh), so without
+    # this subscription the dashboard sidebar copy would stay stale
+    # until the next slot_state_refresh fired from elsewhere.
+    _bus.settings_dirty.connect(_resync)
 
     h.addWidget(lbl); h.addStretch(1); h.addWidget(sw)
     return row
