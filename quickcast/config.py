@@ -346,6 +346,98 @@ class RecoverySettings(BaseModel):
     steps: list[RecoveryStep] = Field(default_factory=list)
 
 
+class ClientProfile(BaseModel):
+    """Per-client configuration — capture target, slots, alarms, overlays.
+
+    QuickCast can run multiple game clients in parallel (e.g. 주캐 + 부캐).
+    Each client tab has its own capture window, slot bindings, PK/potion
+    detectors, alarms, and ROI profiles. ``Settings.clients`` holds one
+    ClientProfile per tab; the top-level Settings fields mirror whichever
+    client is currently active (``Settings.active_client_id``), so existing
+    code accessing ``settings.slots`` keeps working — it always sees the
+    active tab's data. On tab switch / save, the top-level snapshot is
+    written back into the matching ``clients[id]`` entry.
+
+    Shared across clients (NOT in this class): Arduino/Telegram tokens,
+    theme, tutorial flag, OCR digit templates, capture FPS/scale, the
+    global master_switch, notify toggles. Those live on Settings directly.
+    """
+    # Tab UI metadata
+    label: str = ""               # 탭에 표시되는 이름 (예: "클라1")
+    enabled: bool = True          # 이 클라의 매크로 가동 (master_switch와 AND)
+
+    # Input backend per client — each tab targets a different HWND, so
+    # PostMessage/AttachInput must be wired per-client.
+    input_backend: str = "postmessage"
+    sura_mode: bool = False
+
+    # Capture target
+    capture_window_title: str = ""
+    capture_monitor_index: int = 1
+
+    # ROI — bar regions
+    hp_cap: Point = Field(default_factory=lambda: Point(x=78, y=24))
+    hp_cap_w: int = 160
+    hp_cap_h: int = 5
+    mp_cap: Point = Field(default_factory=lambda: Point(x=76, y=35))
+    mp_cap_w: int = 157
+    mp_cap_h: int = 6
+
+    # ROI — OCR text regions (0×0 means "not configured")
+    hp_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    hp_text_cap_w: int = 0
+    hp_text_cap_h: int = 0
+    mp_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    mp_text_cap_w: int = 0
+    mp_text_cap_h: int = 0
+    potion_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    potion_text_cap_w: int = 0
+    potion_text_cap_h: int = 0
+    buff_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
+    buff_text_cap_w: int = 0
+    buff_text_cap_h: int = 0
+
+    # Slot bindings + detectors
+    slots: dict[str, Slot] = Field(default_factory=dict)
+    pk: PkSlot = Field(default_factory=PkSlot)
+    potion: PotionSlot = Field(default_factory=PotionSlot)
+    buff: BuffCounter = Field(default_factory=BuffCounter)
+
+    # Alarms (per-client clock alarms + per-client sound/popup config)
+    alarms: list[Alarm] = Field(default_factory=list)
+    alarm_popup_enabled: bool = True
+    alarm_auto_close_minutes: int = 10
+    alarm_repeat_minutes: int = 1
+    alarm_sound: str = "default"
+    alarm_sound_volume: int = 80
+
+    # ROI profiles (per-aspect coordinate sets)
+    roi_profiles: dict[str, RoiProfile] = Field(default_factory=dict)
+    active_aspect: str = ""
+    lock_aspect_profile: bool = True
+
+    # Auto-recovery / overlay close / item close
+    recovery: RecoverySettings = Field(default_factory=RecoverySettings)
+    item_close: ItemCloseSettings = Field(default_factory=ItemCloseSettings)
+    overlay_closes: dict[str, OverlayClose] = Field(
+        default_factory=lambda: {
+            "pet_whistle": OverlayClose(),
+            "item_acquired": OverlayClose(
+                cap=Point(x=594, y=94),
+                cap_w=85,
+                cap_h=77,
+                threshold=3_500_000,
+            ),
+            "blood_pledge": OverlayClose(
+                cap=Point(x=594, y=94),
+                cap_w=85,
+                cap_h=77,
+                threshold=3_500_000,
+            ),
+        }
+    )
+
+
 class Settings(BaseModel):
     """Top-level configuration mirroring the original `param` object."""
     # Connection meta
@@ -509,6 +601,15 @@ class Settings(BaseModel):
     # re-launch it.
     tutorial_completed: bool = False
 
+    # ───────── Multi-client tabs ─────────
+    # QuickCast can run two game clients in parallel (Chrome-tab style).
+    # ``clients`` holds the persisted per-tab data; ``active_client_id``
+    # is the tab currently shown in the UI — its data is mirrored into
+    # the top-level fields above so existing code (settings.slots etc.)
+    # keeps working unchanged. switch_client() handles the round-trip.
+    clients: dict[str, "ClientProfile"] = Field(default_factory=dict)
+    active_client_id: str = "client1"
+
     def reset_roi(self, kind: str) -> bool:
         """Reset one ROI rectangle to its built-in default placement.
 
@@ -552,6 +653,136 @@ class Settings(BaseModel):
         else:
             return False
         return True
+
+    # ───────── Multi-client (per-tab) ─────────
+    def _snapshot_client(self) -> "ClientProfile":
+        """Capture current top-level client-scoped fields as a ClientProfile.
+
+        Mirrors the roi_profiles snapshot/apply pattern used by
+        ``_snapshot_active_profile``. Called before switching tabs or
+        saving so the active client's edits land in clients[active_id].
+        Preserves label/enabled from the existing entry (those are tab
+        metadata, not user-edited via top-level fields).
+        """
+        existing = self.clients.get(self.active_client_id)
+        label = existing.label if existing else self.active_client_id
+        enabled = existing.enabled if existing else True
+        return ClientProfile(
+            label=label,
+            enabled=enabled,
+            input_backend=self.input_backend,
+            sura_mode=self.sura_mode,
+            capture_window_title=self.capture_window_title,
+            capture_monitor_index=self.capture_monitor_index,
+            hp_cap=Point(x=self.hp_cap.x, y=self.hp_cap.y),
+            hp_cap_w=self.hp_cap_w, hp_cap_h=self.hp_cap_h,
+            mp_cap=Point(x=self.mp_cap.x, y=self.mp_cap.y),
+            mp_cap_w=self.mp_cap_w, mp_cap_h=self.mp_cap_h,
+            hp_text_cap=Point(x=self.hp_text_cap.x, y=self.hp_text_cap.y),
+            hp_text_cap_w=self.hp_text_cap_w, hp_text_cap_h=self.hp_text_cap_h,
+            mp_text_cap=Point(x=self.mp_text_cap.x, y=self.mp_text_cap.y),
+            mp_text_cap_w=self.mp_text_cap_w, mp_text_cap_h=self.mp_text_cap_h,
+            potion_text_cap=Point(x=self.potion_text_cap.x, y=self.potion_text_cap.y),
+            potion_text_cap_w=self.potion_text_cap_w, potion_text_cap_h=self.potion_text_cap_h,
+            buff_text_cap=Point(x=self.buff_text_cap.x, y=self.buff_text_cap.y),
+            buff_text_cap_w=self.buff_text_cap_w, buff_text_cap_h=self.buff_text_cap_h,
+            slots={k: v.model_copy(deep=True) for k, v in self.slots.items()},
+            pk=self.pk.model_copy(deep=True),
+            potion=self.potion.model_copy(deep=True),
+            buff=self.buff.model_copy(deep=True),
+            alarms=[a.model_copy(deep=True) for a in self.alarms],
+            alarm_popup_enabled=self.alarm_popup_enabled,
+            alarm_auto_close_minutes=self.alarm_auto_close_minutes,
+            alarm_repeat_minutes=self.alarm_repeat_minutes,
+            alarm_sound=self.alarm_sound,
+            alarm_sound_volume=self.alarm_sound_volume,
+            roi_profiles={k: v.model_copy(deep=True) for k, v in self.roi_profiles.items()},
+            active_aspect=self.active_aspect,
+            lock_aspect_profile=self.lock_aspect_profile,
+            recovery=self.recovery.model_copy(deep=True),
+            item_close=self.item_close.model_copy(deep=True),
+            overlay_closes={k: v.model_copy(deep=True) for k, v in self.overlay_closes.items()},
+        )
+
+    def _apply_client(self, p: "ClientProfile") -> None:
+        """Load a profile's fields into top-level (mutating active state).
+
+        Inverse of ``_snapshot_client``. After this call settings.slots /
+        settings.pk / settings.capture_window_title etc. reflect the
+        supplied profile, so existing UI/controller code reading from
+        the top-level sees the newly active tab's data.
+        """
+        self.input_backend = p.input_backend
+        self.sura_mode = p.sura_mode
+        self.capture_window_title = p.capture_window_title
+        self.capture_monitor_index = p.capture_monitor_index
+        self.hp_cap = Point(x=p.hp_cap.x, y=p.hp_cap.y)
+        self.hp_cap_w, self.hp_cap_h = p.hp_cap_w, p.hp_cap_h
+        self.mp_cap = Point(x=p.mp_cap.x, y=p.mp_cap.y)
+        self.mp_cap_w, self.mp_cap_h = p.mp_cap_w, p.mp_cap_h
+        self.hp_text_cap = Point(x=p.hp_text_cap.x, y=p.hp_text_cap.y)
+        self.hp_text_cap_w, self.hp_text_cap_h = p.hp_text_cap_w, p.hp_text_cap_h
+        self.mp_text_cap = Point(x=p.mp_text_cap.x, y=p.mp_text_cap.y)
+        self.mp_text_cap_w, self.mp_text_cap_h = p.mp_text_cap_w, p.mp_text_cap_h
+        self.potion_text_cap = Point(x=p.potion_text_cap.x, y=p.potion_text_cap.y)
+        self.potion_text_cap_w, self.potion_text_cap_h = p.potion_text_cap_w, p.potion_text_cap_h
+        self.buff_text_cap = Point(x=p.buff_text_cap.x, y=p.buff_text_cap.y)
+        self.buff_text_cap_w, self.buff_text_cap_h = p.buff_text_cap_w, p.buff_text_cap_h
+        self.slots = {k: v.model_copy(deep=True) for k, v in p.slots.items()}
+        self.pk = p.pk.model_copy(deep=True)
+        self.potion = p.potion.model_copy(deep=True)
+        self.buff = p.buff.model_copy(deep=True)
+        self.alarms = [a.model_copy(deep=True) for a in p.alarms]
+        self.alarm_popup_enabled = p.alarm_popup_enabled
+        self.alarm_auto_close_minutes = p.alarm_auto_close_minutes
+        self.alarm_repeat_minutes = p.alarm_repeat_minutes
+        self.alarm_sound = p.alarm_sound
+        self.alarm_sound_volume = p.alarm_sound_volume
+        self.roi_profiles = {k: v.model_copy(deep=True) for k, v in p.roi_profiles.items()}
+        self.active_aspect = p.active_aspect
+        self.lock_aspect_profile = p.lock_aspect_profile
+        self.recovery = p.recovery.model_copy(deep=True)
+        self.item_close = p.item_close.model_copy(deep=True)
+        self.overlay_closes = {k: v.model_copy(deep=True) for k, v in p.overlay_closes.items()}
+
+    def switch_client(self, client_id: str) -> bool:
+        """Switch the active client tab. Returns True if active_client_id
+        actually changed. Snapshots current top-level into the old tab's
+        profile, then applies the new tab's profile to top-level fields
+        so existing code reading from settings.* immediately sees the
+        new tab's data without any other changes.
+        """
+        if client_id == self.active_client_id:
+            return False
+        if client_id not in self.clients:
+            return False
+        self.clients[self.active_client_id] = self._snapshot_client()
+        self._apply_client(self.clients[client_id])
+        self.active_client_id = client_id
+        return True
+
+    def _init_default_clients(self) -> None:
+        """Idempotent seed: ensure clients dict has client1 + client2.
+
+        On migration from a pre-multi-client userdata.json, client1
+        inherits whatever was already in the top-level fields (snapshot
+        of current state). client2 gets fresh defaults with its own slot
+        layout so it isn't empty. Also normalises active_client_id to a
+        valid key.
+        """
+        if "client1" not in self.clients:
+            c1 = self._snapshot_client()
+            # Force the Korean default label — the snapshot path falls
+            # back to active_client_id ("client1") which is the internal
+            # key, not what the user should see in the tab.
+            c1.label = "클라1"
+            self.clients["client1"] = c1
+        if "client2" not in self.clients:
+            self.clients["client2"] = ClientProfile(
+                label="클라2", slots=_default_slots(),
+            )
+        if self.active_client_id not in self.clients:
+            self.active_client_id = "client1"
 
     # ───────── ROI profile (per-aspect) ─────────
     def _snapshot_active_profile(self) -> RoiProfile:
@@ -667,6 +898,13 @@ class Settings(BaseModel):
 
     # ───────── persistence ─────────
     def save(self, path: Path = CONFIG_PATH) -> None:
+        # Re-snapshot active client into clients dict before serialise so
+        # edits made to top-level fields (settings.slots etc.) since the
+        # last switch_client() actually persist. Without this the
+        # clients[active] entry would carry stale data and a save/reload
+        # round-trip would discard the user's recent edits.
+        if self.active_client_id:
+            self.clients[self.active_client_id] = self._snapshot_client()
         # Always re-snapshot the active aspect before serialising so the
         # on-disk state matches the live top-level coords (otherwise an
         # edit made *after* the last aspect switch would not persist into
@@ -683,9 +921,29 @@ class Settings(BaseModel):
     def load(cls, path: Path = CONFIG_PATH) -> "Settings":
         if not path.exists():
             settings = cls(slots=_default_slots())
+            settings._init_default_clients()
             settings.save(path)
             return settings
-        s = cls.model_validate_json(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        # Pre-multi-client userdata.json files have no "clients" key — we
+        # detect that here so we can seed clients[client1] from the
+        # already-loaded top-level fields after model_validate.
+        try:
+            raw_data = json.loads(raw)
+            needs_seed = not bool(raw_data.get("clients"))
+        except Exception:
+            needs_seed = False
+        s = cls.model_validate_json(raw)
+        if needs_seed:
+            s._init_default_clients()
+            # Persist the migrated layout immediately so subsequent loads
+            # go through the fast path (no re-seeding, no risk of the
+            # migration result being lost if the app crashes before
+            # save_debounced fires).
+            try:
+                s.save(path)
+            except Exception:
+                pass
         # NORMED migration — recognition.py now caps potion score at
         # 250_000 and pk score at 5_000_000. Saved values from the old
         # raw-TM_CCOEFF era could be way over those ceilings, in which
@@ -813,5 +1071,6 @@ __all__ = [
     "Range", "Point", "Slot", "PkSlot", "PotionSlot", "BuffCounter",
     "ItemCloseSettings", "OverlayClose", "RoiProfile",
     "ASPECT_BUCKETS", "ROI_DEFAULTS", "classify_aspect", "Alarm",
+    "RecoveryStep", "RecoverySettings", "ClientProfile",
     "Settings", "CONFIG_PATH", "DATA_DIR",
 ]
