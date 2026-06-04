@@ -6,6 +6,7 @@ hands off to Qt's event loop.
 from __future__ import annotations
 
 import sys
+from typing import Optional
 
 # Force per-monitor v2 DPI awareness BEFORE Qt initialises so the
 # captured frame size, GetClientRect, and PostMessage lParam all live
@@ -71,28 +72,36 @@ def _on_alarm(event: AlarmEvent, telegram: TelegramNotifier) -> None:
         telegram.send_text(msg)
 
 
-def _build_capture(settings: Settings) -> CaptureSource:
-    """Pick a window capture if configured + window currently exists, else monitor.
+def _build_capture_for_profile(
+    profile, settings: Settings, *, allow_auto_detect: bool = True,
+) -> Optional[CaptureSource]:
+    """Pick a capture source for a specific ClientProfile.
 
-    Window capture uses PrintWindow (matches browser getDisplayMedia behaviour:
-    works on background/occluded/minimised windows, multi-monitor safe).
+    ``profile.capture_window_title`` takes precedence (last user pick on
+    that tab). ``allow_auto_detect=True`` lets the function fall back to
+    the shared ``settings.game_window_patterns`` auto-detect — useful for
+    the active client on first launch, but disabled for client2 so its
+    auto-detection doesn't grab the same window as client1.
 
-    Order of precedence:
-      1. settings.capture_window_title — exact substring match (last user pick)
-      2. settings.game_window_patterns — auto-detect Lineage W on first run
-         (handles "리니지W | 캐릭명" form because find_window does substring match)
-      3. monitor fallback
+    Returns ``None`` when no window is configured and auto-detect is off
+    or yields nothing — callers (e.g. client2 standby) treat None as "no
+    capture for this tab yet, user will pick one in the UI". The active
+    client falls back to ``MonitorCapture`` so the macro can still run.
     """
     from quickcast.utils.window_finder import _window_title  # for resolved title
-    if settings.capture_window_title:
-        hwnd = find_window([settings.capture_window_title])
+    if profile.capture_window_title:
+        hwnd = find_window([profile.capture_window_title])
         if hwnd:
-            full_title = _window_title(hwnd) or settings.capture_window_title
-            logger.info(f"🎯 캡처 대상: {full_title}")
+            full_title = _window_title(hwnd) or profile.capture_window_title
+            logger.info(f"🎯 [{profile.label}] 캡처 대상: {full_title}")
             return WindowPrintCapture(hwnd=hwnd, label=full_title)
         logger.warning(
-            f"⚠️ 저장된 창 '{settings.capture_window_title}' 못 찾음 — 자동 감지 시도"
+            f"⚠️ [{profile.label}] 저장된 창 '{profile.capture_window_title}' "
+            f"못 찾음 — 자동 감지 {'시도' if allow_auto_detect else '비활성'}"
         )
+
+    if not allow_auto_detect:
+        return None
 
     # Auto-detect using configured patterns (default includes 리니지W, PURPLE, etc.)
     hwnd = find_window(settings.game_window_patterns)
@@ -101,21 +110,45 @@ def _build_capture(settings: Settings) -> CaptureSource:
         # Persist a stable substring so next launch goes straight to it.
         # Use the part before " | " so character-name changes still match.
         stable = full_title.split(" | ", 1)[0].split("|", 1)[0].strip() or full_title
-        settings.capture_window_title = stable
+        profile.capture_window_title = stable
+        # Mirror into top-level when this profile happens to be active so
+        # the running macro sees the same value without an extra reload.
+        if profile is settings.get_profile():
+            settings.capture_window_title = stable
         try:
             settings.save()
         except Exception:
             pass
         logger.success(
-            f"🎯 게임창 자동 감지: '{full_title}' "
+            f"🎯 [{profile.label}] 게임창 자동 감지: '{full_title}' "
             f"→ 저장 키 '{stable}'"
         )
         return WindowPrintCapture(hwnd=hwnd, label=full_title)
 
     logger.info(
-        f"게임창 자동 감지 실패 → 모니터 {settings.capture_monitor_index} 캡처로 시작"
+        f"[{profile.label}] 게임창 자동 감지 실패 "
+        f"→ 모니터 {profile.capture_monitor_index} 캡처로 시작"
     )
-    return MonitorCapture(monitor_index=settings.capture_monitor_index)
+    return MonitorCapture(monitor_index=profile.capture_monitor_index)
+
+
+def _build_capture(settings: Settings) -> CaptureSource:
+    """Backward-compat shim — build capture for the active client.
+
+    Pre-multi-client callers (tests, old scripts) get the same behaviour
+    as before via this thin wrapper. New code should call
+    ``_build_capture_for_profile`` directly.
+    """
+    cap = _build_capture_for_profile(
+        settings.get_profile(), settings, allow_auto_detect=True,
+    )
+    if cap is None:
+        # Active client always falls back to MonitorCapture (the original
+        # behaviour) so the macro pipeline never starts with a null
+        # capture. _build_capture_for_profile only returns None when
+        # auto-detect is disabled, which doesn't happen here.
+        cap = MonitorCapture(monitor_index=settings.capture_monitor_index)
+    return cap
 
 
 def run() -> None:
@@ -266,6 +299,61 @@ def run() -> None:
         attachinp.set_target(auto_hwnd, auto_title)
     controller._auto_hwnd = auto_hwnd
     controller._auto_title = auto_title
+
+    # ── Standby runtime for the non-active client ──────────────────────
+    # Pre-build capture + slot_manager for every non-active client so the
+    # UI tab switch (Phase 3) can flip the live runtime without a window
+    # re-bind round-trip. client2's capture is OPTIONAL — if the user
+    # hasn't picked a window for that tab yet, ``_build_capture_for_profile``
+    # returns None and we record a placeholder. Auto-detect is disabled
+    # for non-active clients so we don't accidentally grab the active
+    # client's game window for both tabs.
+    #
+    # Phase 2A leaves these in standby (no controller, no thread). Phase 2B
+    # will wire per-client MacroController instances so two tabs can run
+    # concurrently.
+    standby_runtimes: dict[str, dict] = {}
+    for cid, profile in settings.clients.items():
+        if cid == settings.active_client_id:
+            continue
+        try:
+            sb_cap = _build_capture_for_profile(
+                profile, settings, allow_auto_detect=False,
+            )
+        except Exception:
+            logger.exception(f"standby capture build failed for {cid}")
+            sb_cap = None
+        sb_sm = SlotManager()
+        # Per-client PostMessage / AttachInput so each tab targets its
+        # own HWND. Arduino is shared (single physical device, user
+        # decision). Backends start untargeted — set_target() runs when
+        # a game window resolves.
+        sb_postmsg = PostMessageBackend()
+        sb_attach = AttachInputBackend()
+        sb_hwnd = 0
+        sb_title = ""
+        if isinstance(sb_cap, WindowPrintCapture):
+            sb_hwnd = sb_cap.hwnd
+            sb_title = sb_cap.label
+            sb_postmsg.set_target(sb_hwnd, sb_title)
+            sb_attach.set_target(sb_hwnd, sb_title)
+        standby_runtimes[cid] = {
+            "profile": profile,
+            "capture": sb_cap,
+            "slot_manager": sb_sm,
+            "postmsg": sb_postmsg,
+            "attachinp": sb_attach,
+            "auto_hwnd": sb_hwnd,
+            "auto_title": sb_title,
+        }
+        logger.info(
+            f"📋 [{profile.label}] 대기 런타임 준비됨 "
+            f"(capture={'OK' if sb_cap else '없음'}, hwnd={sb_hwnd or '미설정'})"
+        )
+    # Hand-off slot for Phase 2B/3 — AppWindow currently doesn't consume
+    # this, but having a single dict makes the controller-duplication
+    # work in 2B a drop-in: just iterate and start each runtime.
+    controller._standby_runtimes = standby_runtimes
 
     # Alarm scheduler — fires both Telegram and (later) tray toast.
     alarms = AlarmScheduler(settings, on_alarm=lambda e: _on_alarm(e, telegram))

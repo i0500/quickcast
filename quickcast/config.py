@@ -761,6 +761,26 @@ class Settings(BaseModel):
         self.active_client_id = client_id
         return True
 
+    def get_profile(self, client_id: str | None = None) -> "ClientProfile":
+        """Return the ClientProfile for ``client_id`` (default: active).
+
+        Convenience accessor for callers that need to read a client's
+        data WITHOUT switching the active tab. Falls back to returning
+        the active profile when the id is unknown so callers don't have
+        to guard against KeyError on every read.
+        """
+        if client_id is None:
+            client_id = self.active_client_id
+        prof = self.clients.get(client_id)
+        if prof is None:
+            prof = self.clients.get(self.active_client_id)
+        if prof is None:
+            # Last-resort fallback — bootstrap a default so callers always
+            # get something back. Only hit when clients dict is empty,
+            # which shouldn't happen post-_init_default_clients.
+            prof = ClientProfile(label=client_id or "client1")
+        return prof
+
     def _init_default_clients(self) -> None:
         """Idempotent seed: ensure clients dict has client1 + client2.
 
