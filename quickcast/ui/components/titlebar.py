@@ -45,6 +45,13 @@ class TitleBar(QFrame):
         self.name_lbl = QLabel(app_name); self.name_lbl.setObjectName("appName")
         f = QFont(); f.setBold(True); f.setPointSize(11); self.name_lbl.setFont(f)
         h.addWidget(self.icon_lbl); h.addWidget(self.name_lbl)
+
+        # Client-tab slot — AppWindow injects a ClientTabs widget here via
+        # set_client_tabs() after the title bar is built. Sits between the
+        # app name and the right-side toggles so it reads like Chrome tabs.
+        h.addSpacing(16)
+        self._client_tabs: Optional[QWidget] = None
+        self._client_tabs_index = h.count()  # remember where to insert
         h.addStretch(1)
 
         # Master + Floating toggles — both styled identically (label + iOS toggle)
@@ -81,6 +88,22 @@ class TitleBar(QFrame):
         h.addWidget(self.btn_min); h.addWidget(self.btn_max); h.addWidget(self.btn_close)
 
     # ───────── public API ─────────
+    def set_client_tabs(self, widget: QWidget) -> None:
+        """Inject a ClientTabs (or any QWidget) into the slot between the
+        app name and the right-side toggles. AppWindow calls this after
+        the title bar has been built so it can wire its own signals to
+        the injected widget without TitleBar needing to know the type.
+        """
+        layout = self.layout()
+        if self._client_tabs is not None:
+            layout.removeWidget(self._client_tabs)
+            self._client_tabs.deleteLater()
+        self._client_tabs = widget
+        layout.insertWidget(self._client_tabs_index, widget)
+
+    def client_tabs(self) -> Optional[QWidget]:
+        return self._client_tabs
+
     def set_master(self, on: bool) -> None:
         self._master = on
         self.master_toggle.set_state(on, animate=True)
