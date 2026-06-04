@@ -72,6 +72,67 @@ def _on_alarm(event: AlarmEvent, telegram: TelegramNotifier) -> None:
         telegram.send_text(msg)
 
 
+def _build_window_capture(hwnd: int, label: str) -> Optional[CaptureSource]:
+    """Pick a window capture backend.
+
+    Fallback ladder, preferred order:
+      1. **PrintWindow** — fastest, hwnd-bound, works on most games.
+      2. **WGC (Windows.Graphics.Capture)** — hwnd-bound GPU capture,
+         works on PrintWindow-refusing games (Vulkan/D3D11+) AND ignores
+         overlapping windows. Win10 1809+ only.
+      3. **mss WindowCapture** — last-resort, captures the monitor
+         region under the window's screen rect; will include any window
+         placed on top of the game.
+
+    Each tier is verified with a quick grab() + blank-frame test so a
+    "succeeded but produces black frames" backend is treated as failed.
+    """
+    def _is_blank(frame) -> bool:
+        try:
+            return float(frame.image[:, :, :3].mean()) < 2.0
+        except Exception:
+            return True
+
+    # Tier 1: PrintWindow
+    try:
+        cap = WindowPrintCapture(hwnd=hwnd, label=label)
+        test = cap.grab()
+        if _is_blank(test):
+            raise RuntimeError("blank frame")
+        return cap
+    except Exception:
+        pass
+
+    # Tier 2: WGC
+    try:
+        from quickcast.core.window_wgc_capture import WGCWindowCapture
+        cap = WGCWindowCapture(hwnd=hwnd, label=label)
+        test = cap.grab()
+        if _is_blank(test):
+            cap.close()
+            raise RuntimeError("blank frame")
+        logger.info(f"🔄 [{label[:30]}] PrintWindow 거부 — WGC로 fallback (창 전용)")
+        return cap
+    except Exception as e:
+        # WGC unsupported (Win10 pre-1809) or pkg not installed — fall through.
+        logger.debug(f"WGC 시도 실패 ({label[:24]}): {e}")
+
+    # Tier 3: mss WindowCapture (monitor-region, may pick up overlapping windows)
+    try:
+        cap = WindowCapture(hwnd=hwnd, label=label)
+        test = cap.grab()
+        if _is_blank(test):
+            raise RuntimeError("blank frame")
+        logger.info(
+            f"🔄 [{label[:30]}] WGC도 사용 불가 — mss로 fallback "
+            f"(겹친 창은 같이 캡처됨)"
+        )
+        return cap
+    except Exception as e:
+        logger.warning(f"⚠️ [{label[:30]}] 캡처 빌드 실패: {e}")
+        return None
+
+
 def _build_capture_for_profile(
     profile, settings: Settings, *, allow_auto_detect: bool = True,
 ) -> Optional[CaptureSource]:
@@ -82,6 +143,9 @@ def _build_capture_for_profile(
     the shared ``settings.game_window_patterns`` auto-detect — useful for
     the active client on first launch, but disabled for client2 so its
     auto-detection doesn't grab the same window as client1.
+
+    PrintWindow refusal is handled here too: we try mss WindowCapture as
+    a fallback so a GPU-accelerated game still produces frames.
 
     Returns ``None`` when no window is configured and auto-detect is off
     or yields nothing — callers (e.g. client2 standby) treat None as "no
@@ -94,11 +158,15 @@ def _build_capture_for_profile(
         if hwnd:
             full_title = _window_title(hwnd) or profile.capture_window_title
             logger.info(f"🎯 [{profile.label}] 캡처 대상: {full_title}")
-            return WindowPrintCapture(hwnd=hwnd, label=full_title)
-        logger.warning(
-            f"⚠️ [{profile.label}] 저장된 창 '{profile.capture_window_title}' "
-            f"못 찾음 — 자동 감지 {'시도' if allow_auto_detect else '비활성'}"
-        )
+            cap = _build_window_capture(hwnd, full_title)
+            if cap is not None:
+                return cap
+            # PrintWindow + mss both failed — fall through.
+        else:
+            logger.warning(
+                f"⚠️ [{profile.label}] 저장된 창 '{profile.capture_window_title}' "
+                f"못 찾음 — 자동 감지 {'시도' if allow_auto_detect else '비활성'}"
+            )
 
     if not allow_auto_detect:
         return None
@@ -123,7 +191,9 @@ def _build_capture_for_profile(
             f"🎯 [{profile.label}] 게임창 자동 감지: '{full_title}' "
             f"→ 저장 키 '{stable}'"
         )
-        return WindowPrintCapture(hwnd=hwnd, label=full_title)
+        cap = _build_window_capture(hwnd, full_title)
+        if cap is not None:
+            return cap
 
     logger.info(
         f"[{profile.label}] 게임창 자동 감지 실패 "
@@ -286,10 +356,11 @@ def run() -> None:
     # backends + remember the HWND so MainWindow can attach the floater.
     auto_hwnd = 0
     auto_title = ""
-    if isinstance(capture, WindowPrintCapture):
-        auto_hwnd = capture.hwnd
-        auto_title = capture.label
-    elif settings.capture_window_title:
+    # All three window-bound capture backends expose .hwnd / .label.
+    if hasattr(capture, "hwnd") and hasattr(capture, "label"):
+        auto_hwnd = int(getattr(capture, "hwnd", 0) or 0)
+        auto_title = getattr(capture, "label", "") or ""
+    if not auto_hwnd and settings.capture_window_title:
         from quickcast.utils.window_finder import find_window as _fw
         h = _fw([settings.capture_window_title])
         if h:
@@ -333,11 +404,15 @@ def run() -> None:
         sb_attach = AttachInputBackend()
         sb_hwnd = 0
         sb_title = ""
-        if isinstance(sb_cap, WindowPrintCapture):
-            sb_hwnd = sb_cap.hwnd
-            sb_title = sb_cap.label
-            sb_postmsg.set_target(sb_hwnd, sb_title)
-            sb_attach.set_target(sb_hwnd, sb_title)
+        # All window-bound backends (PrintWindow / WGC / mss WindowCapture)
+        # expose .hwnd / .label — duck-type rather than isinstance-list so
+        # adding a new backend doesn't require touching this site.
+        if sb_cap is not None and hasattr(sb_cap, "hwnd") and hasattr(sb_cap, "label"):
+            sb_hwnd = int(getattr(sb_cap, "hwnd", 0) or 0)
+            sb_title = getattr(sb_cap, "label", "") or ""
+            if sb_hwnd:
+                sb_postmsg.set_target(sb_hwnd, sb_title)
+                sb_attach.set_target(sb_hwnd, sb_title)
 
         # Build a controller for this client if we have a capture.
         # NOT started yet — Phase 3 will swap which one is "active" when
@@ -406,81 +481,180 @@ def run() -> None:
     splash.update_message("준비 완료", 100)
     splash.finish_for(window)
 
-    # Floating switch — attached to the game window's HWND when the user
-    # turns it on from the titlebar's floater toggle. Mirrors the master
-    # toggle: clicking the floater flips master, and master flips it.
+    # ── Floating switches — ONE PER CLIENT ─────────────────────────────
+    # Each client tab gets its own floater glued to its own game window.
+    # Clicking a floater toggles ONLY that client's ClientProfile.enabled
+    # (per-tab macro gate) without depending on which tab is currently
+    # shown in the main window. The global master_switch (title bar) is
+    # the outer AND gate — both must be ON for that client to fire.
     from quickcast.ui.floating_switch import FloatingSwitch
-    floater = FloatingSwitch()
-    # Two-way sync with the live settings instance: panel toggles
-    # write back to mock_settings + emit bus signals so the main UI
-    # mirrors instantly, and external changes (UI clicks, macro
-    # auto-disabling a one-shot slot) trigger panel rebuilds + the
-    # auto-expand response.
-    floater.attach_settings(settings)
-    def _on_floater_toggled(on: bool) -> None:
-        if on:
-            target_hwnd = getattr(controller, "_auto_hwnd", 0)
-            if not target_hwnd:
-                # No saved game window — fall back to the app window.
-                try:
-                    target_hwnd = int(window.winId())
-                except Exception:
-                    target_hwnd = 0
-            if target_hwnd:
-                try:
-                    floater.attach_to(int(target_hwnd))
-                except Exception:
-                    pass
-        else:
-            floater.detach()
-    window.floater_toggled.connect(_on_floater_toggled)
-    # Two-way master sync via the floater. The floater drives the same
-    # logical entrypoint as the title-bar toggle so the controller
-    # actually starts and the 3-second grace countdown shows up on the
-    # capture preview. (Previously this only updated the visual mirror,
-    # which is why clicking the floater silently did nothing.)
-    floater.toggled.connect(window._on_master_toggled)
-    window.master_toggled.connect(lambda on: floater.set_state(on))
+    from quickcast.ui.design.signals import bus
+    floaters: dict[str, FloatingSwitch] = {}
 
-    # Auto-attach floater on boot if the user has it enabled and a
-    # game window was auto-detected. Mirrors the title-bar toggle so
-    # the user sees the toggle as "ON" too.
-    if settings.floater_enabled and auto_hwnd:
-        try:
-            floater.attach_to(int(auto_hwnd))
-            window.title_bar.floater_toggle.set_state(True, animate=False)
-        except Exception:
-            logger.exception("floater auto-attach failed")
+    def _client_runtime_for(cid: str) -> dict:
+        """Return the runtime dict for client `cid` (hwnd/title/etc.).
 
-    # Re-attach the floater whenever the system rebinds to a new game
-    # window — either through the user's manual Capture-section pick
-    # OR the periodic auto-detection in AppWindow. Without this the
-    # floater would silently keep tracking the dead HWND from before
-    # the game restart / window swap.
-    from quickcast.ui.design.signals import bus as _gw_bus
-    def _on_game_window_found(hwnd: int, _title: str) -> None:
-        if not settings.floater_enabled:
-            return
-        try:
-            floater.attach_to(int(hwnd))
-        except Exception:
-            logger.exception("floater re-attach failed")
-        # Keep the title-bar toggle in sync (in case this is the
-        # first window we've ever seen this session).
-        try:
-            window.title_bar.floater_toggle.set_state(True, animate=False)
-        except Exception:
-            pass
-    _gw_bus.game_window_found.connect(_on_game_window_found)
-    # Persist the floater state when the user toggles it via title bar.
-    def _on_floater_state_change(on: bool) -> None:
-        if settings.floater_enabled != on:
-            settings.floater_enabled = on
+        AppWindow's ``_controllers`` cache is the source of truth — it
+        stays fresh through tab swaps. The boot-time ``controller``
+        variable here is a STALE reference after the first swap (Python
+        closure captured it at boot, and AppWindow.controller swap
+        doesn't propagate back). Reading from the cache avoids the
+        floater-to-wrong-window bug.
+        """
+        # Try the persistent cache first.
+        ctrl_map = getattr(window, "_controllers", None) or {}
+        ctrl = ctrl_map.get(cid)
+        if ctrl is None:
+            # Cache may not be populated yet on the very first build —
+            # fall through to AppWindow's currently-active controller
+            # (always fresh) when ids match.
+            active = getattr(window, "controller", None)
+            if active is not None and getattr(active, "client_id", "") == cid:
+                ctrl = active
+        if ctrl is not None:
+            return {
+                "auto_hwnd": int(getattr(ctrl, "_auto_hwnd", 0) or 0),
+                "auto_title": getattr(ctrl, "_auto_title", "") or "",
+            }
+        # Last resort — original standby dict (only useful pre-cache).
+        return standby_runtimes.get(cid, {})
+
+    def _make_floater_toggle_handler(cid: str):
+        def _h(on: bool) -> None:
+            prof = settings.clients.get(cid)
+            if prof is None:
+                return
+            if prof.enabled == on:
+                return
+            prof.enabled = on
+            # Mirror into active top-level if this is the active tab so
+            # controller picks it up immediately on next _tick_control.
+            if cid == settings.active_client_id:
+                # ClientProfile.enabled is read via self.profile.enabled
+                # in MacroController, which always returns the fresh
+                # dict-lookup'd profile — no top-level mirror needed.
+                pass
+            bus.settings_dirty.emit()
+            # Update the client-tabs ●ON indicator in the main window.
             try:
-                settings.save()
+                if window._client_tabs is not None:
+                    window._client_tabs.set_enabled_dot(cid, bool(on))
             except Exception:
                 pass
-    window.floater_toggled.connect(_on_floater_state_change)
+            logger.info(
+                f"{'▶️' if on else '⏸️'} [{prof.label}] 플로터 토글 "
+                f"→ enabled={on}"
+            )
+        return _h
+
+    # Build one FloatingSwitch per client.
+    for _cid, _prof in settings.clients.items():
+        fl = FloatingSwitch()
+        fl.attach_settings(settings)
+        # Per-client toggle handler — does NOT touch master_switch.
+        fl.toggled.connect(_make_floater_toggle_handler(_cid))
+        # Initial visual state mirrors that client's enabled.
+        fl.set_state(bool(_prof.enabled))
+        floaters[_cid] = fl
+
+    # Auto-attach each floater to its own client's HWND on boot.
+    for _cid, fl in floaters.items():
+        prof = settings.clients[_cid]
+        if not prof.floater_enabled:
+            logger.info(f"🪟 [{prof.label}] 플로터 비활성 — attach 건너뜀")
+            continue
+        rt = _client_runtime_for(_cid)
+        h = int(rt.get("auto_hwnd", 0) or 0)
+        if not h:
+            logger.info(f"🪟 [{prof.label}] hwnd 없음 — attach 건너뜀")
+            continue
+        try:
+            fl.attach_to(h)
+            logger.success(
+                f"🪟 [{prof.label}] 플로터 attach → hwnd 0x{h:X}"
+            )
+        except Exception:
+            logger.exception(f"floater {_cid} auto-attach failed")
+
+    # Title bar's floater_toggle controls visibility of the ACTIVE tab's
+    # floater (show/hide only — doesn't affect macro gate). Persists onto
+    # the active ClientProfile so re-launching keeps the tab's choice.
+    def _on_titlebar_floater_toggled(on: bool) -> None:
+        active_cid = settings.active_client_id
+        fl = floaters.get(active_cid)
+        prof = settings.clients.get(active_cid)
+        if prof is None or fl is None:
+            return
+        prof.floater_enabled = on
+        if settings.floater_enabled != on:
+            settings.floater_enabled = on  # top-level mirror for legacy
+        if on:
+            rt = _client_runtime_for(active_cid)
+            h = int(rt.get("auto_hwnd", 0) or 0)
+            if h:
+                try:
+                    fl.attach_to(h)
+                except Exception:
+                    logger.exception("floater attach failed")
+            else:
+                # No game window for this tab — at least hide.
+                fl.detach()
+        else:
+            fl.detach()
+        try:
+            settings.save()
+        except Exception:
+            pass
+    window.floater_toggled.connect(_on_titlebar_floater_toggled)
+    # Initial titlebar visual state.
+    try:
+        window.title_bar.floater_toggle.set_state(
+            bool(settings.get_profile().floater_enabled), animate=False,
+        )
+    except Exception:
+        pass
+
+    # When a game window's HWND changes (capture-section pick / auto-
+    # detect / tab swap broadcast), update the matching client's floater.
+    # `game_window_found` always refers to the ACTIVE client — non-active
+    # clients keep their existing floater glue until they swap to active
+    # and the user re-picks a window from the capture page.
+    def _on_game_window_found(hwnd: int, _title: str) -> None:
+        active_cid = settings.active_client_id
+        fl = floaters.get(active_cid)
+        prof = settings.clients.get(active_cid)
+        if fl is None or prof is None:
+            return
+        if prof.floater_enabled and hwnd:
+            try:
+                fl.attach_to(int(hwnd))
+            except Exception:
+                logger.exception("floater re-attach failed")
+        else:
+            try:
+                fl.detach()
+            except Exception:
+                pass
+        # Mirror titlebar toggle to the active client's saved state.
+        try:
+            window.title_bar.floater_toggle.set_state(
+                bool(prof.floater_enabled), animate=False,
+            )
+        except Exception:
+            pass
+    bus.game_window_found.connect(_on_game_window_found)
+
+    # Mirror each client's enabled state back into its floater visual
+    # — covers indirect changes (e.g. settings reload).
+    def _resync_floaters_from_profiles() -> None:
+        for _cid, fl in floaters.items():
+            prof = settings.clients.get(_cid)
+            if prof is not None:
+                try:
+                    fl.set_state(bool(prof.enabled))
+                except Exception:
+                    pass
+    bus.settings_dirty.connect(_resync_floaters_from_profiles)
 
     # Wire alarm to UI via bus.alarm_fired so PySide6 marshals only
     # primitive types across the alarm-thread → GUI-thread boundary.

@@ -147,30 +147,57 @@ def _clean_title(raw: str) -> str:
     return cleaned or "(이름 없음)"
 
 
-def _open_window_picker(parent_widget: QWidget) -> None:
-    """Show the WindowPicker dialog and persist the user's choice."""
+def _set_client_capture_title(cid: str, title: str) -> None:
+    """Write capture_window_title onto a specific client's profile.
+
+    Updates the per-client ClientProfile directly (not the top-level
+    active mirror) so picking a window for client2 while viewing client1
+    doesn't leak into client1's capture target. When the target client
+    happens to be active, the top-level mirror is updated too so
+    AppWindow's _hot_swap_capture sees the new value on its next read.
+    """
+    prof = mock_settings.clients.get(cid)
+    if prof is None:
+        return
+    if prof.capture_window_title == title:
+        return
+    prof.capture_window_title = title
+    if cid == mock_settings.active_client_id:
+        mock_settings.capture_window_title = title
+    bus.settings_dirty.emit()
+    try:
+        bus.capture_target_changed.emit()
+    except Exception:
+        pass
+
+
+def _open_window_picker_for(cid: str, parent_widget: QWidget) -> None:
+    """Show the WindowPicker dialog and persist the choice on client `cid`.
+
+    This writes onto the named client's ClientProfile rather than always
+    on the active client — so the user can configure both tabs from a
+    single Capture page without juggling tab swaps.
+    """
     try:
         from quickcast.ui.window_picker import WindowPicker
     except Exception:
         QMessageBox.warning(parent_widget, "창 선택", "WindowPicker를 불러오지 못했습니다.")
         return
     from PySide6.QtWidgets import QDialog
-    dlg = WindowPicker(
-        current_title=mock_settings.capture_window_title, parent=parent_widget,
-    )
+    prof = mock_settings.clients.get(cid)
+    current = prof.capture_window_title if prof is not None else ""
+    dlg = WindowPicker(current_title=current, parent=parent_widget)
     if dlg.exec() != QDialog.Accepted:
         return
     chosen = dlg.chosen()
     if chosen is None:
         return
-    if mock_settings.capture_window_title != chosen.title:
-        mock_settings.capture_window_title = chosen.title
-        bus.settings_dirty.emit()
-        # Notify AppWindow so it hot-swaps the controller's capture source.
-        try:
-            bus.capture_target_changed.emit()
-        except Exception:
-            pass
+    _set_client_capture_title(cid, chosen.title)
+
+
+def _open_window_picker(parent_widget: QWidget) -> None:
+    """Legacy entry point — picks for the currently-active client."""
+    _open_window_picker_for(mock_settings.active_client_id, parent_widget)
 
 
 def make_capture() -> tuple[QWidget, QWidget]:
@@ -242,28 +269,44 @@ def make_capture() -> tuple[QWidget, QWidget]:
     header.addWidget(pick_btn)
     v.addLayout(header)
 
-    # Connection summary — refreshed when the user picks a new window.
+    # Connection summary — one row PER CLIENT so the user can configure
+    # both tabs from this page without tab-swapping. Each row writes
+    # ONLY onto its own ClientProfile (see _set_client_capture_title) so
+    # picking a window for 클라2 never bleeds into 클라1.
     conn = Card("현재 캡처 대상")
-    conn_row = QHBoxLayout(); conn_row.setSpacing(16)
-    sd = StatusDot("창")
 
-    def _refresh_current_target() -> None:
-        raw = mock_settings.capture_window_title or ""
-        sd.set(bool(raw), _clean_title(raw) if raw else "선택되지 않음")
-    _refresh_current_target()
-    bus.capture_target_changed.connect(_refresh_current_target)
-
-    clear_btn = IconButton("지우기", "x", size="sm")
-    def _clear_target() -> None:
-        if not mock_settings.capture_window_title:
+    def _add_client_row(cid: str) -> None:
+        prof = mock_settings.clients.get(cid)
+        if prof is None:
             return
-        mock_settings.capture_window_title = ""
-        bus.settings_dirty.emit()
-        bus.capture_target_changed.emit()
-    clear_btn.clicked.connect(_clear_target)
+        label = prof.label or cid
+        row = QHBoxLayout(); row.setSpacing(12)
+        sd = StatusDot(label)
+        pick = IconButton("선택", "crosshair", size="sm")
+        pick.clicked.connect(
+            lambda _=False, _cid=cid: _open_window_picker_for(_cid, main)
+        )
+        clear = IconButton("지우기", "x", size="sm")
+        def _do_clear(_=False, _cid=cid) -> None:
+            p = mock_settings.clients.get(_cid)
+            if p is None or not p.capture_window_title:
+                return
+            _set_client_capture_title(_cid, "")
+        clear.clicked.connect(_do_clear)
+        row.addWidget(sd); row.addStretch(1)
+        row.addWidget(pick); row.addWidget(clear)
+        conn.add(row)
 
-    conn_row.addWidget(sd); conn_row.addStretch(1); conn_row.addWidget(clear_btn)
-    conn.add(conn_row)
+        def _refresh(_cid=cid, _sd=sd) -> None:
+            p = mock_settings.clients.get(_cid)
+            raw = (p.capture_window_title if p is not None else "") or ""
+            _sd.set(bool(raw), _clean_title(raw) if raw else "선택되지 않음")
+        _refresh()
+        bus.capture_target_changed.connect(_refresh)
+        bus.theme_changed.connect(_refresh)
+
+    for _cid in mock_settings.clients.keys():
+        _add_client_row(_cid)
 
     # Source-size + DPI diagnostic — surfaces the "캡처 1/4 좌상단" symptom
     # at a glance. 1280×720 is the recognition pipeline's normalised

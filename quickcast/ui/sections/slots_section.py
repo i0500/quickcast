@@ -478,6 +478,11 @@ def make_slots() -> tuple[QWidget, QWidget]:
         _select(selected["sid"])
 
     _rebuild()
+    # Multi-client: when AppWindow swaps active client, the top-level
+    # mock_settings.slots dict is replaced wholesale. Without this
+    # subscription the slot rows would stay frozen on the previous tab's
+    # data even though add/delete buttons emit the same signal.
+    bus.slot_list_changed.connect(_rebuild)
 
     def _add_slot() -> None:
         sid = _next_slot_id()

@@ -419,6 +419,10 @@ def make_alerts() -> tuple[QWidget, QWidget]:
             list_wrap.addWidget(_bind_alarm_row(al, _delete_alarm))
 
     _rebuild_list()
+    # Multi-client: when AppWindow swaps active client, the top-level
+    # mock_settings.alarms list is replaced wholesale. Subscribe to the
+    # change signal so the alert rows re-render with the new tab's data.
+    bus.alarm_list_changed.connect(_rebuild_list)
     v.addLayout(list_wrap)
 
     def _add_alarm() -> None:

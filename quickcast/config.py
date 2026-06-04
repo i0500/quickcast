@@ -365,6 +365,11 @@ class ClientProfile(BaseModel):
     # Tab UI metadata
     label: str = ""               # 탭에 표시되는 이름 (예: "클라1")
     enabled: bool = True          # 이 클라의 매크로 가동 (master_switch와 AND)
+    # Floating switch shown attached to this tab's game window when this
+    # tab is the active one. AppWindow keeps a single floater widget and
+    # re-attaches it to whichever client_id is currently active, so each
+    # tab can independently decide whether to show the magnet button.
+    floater_enabled: bool = True
 
     # Input backend per client — each tab targets a different HWND, so
     # PostMessage/AttachInput must be wired per-client.
@@ -670,6 +675,7 @@ class Settings(BaseModel):
         return ClientProfile(
             label=label,
             enabled=enabled,
+            floater_enabled=bool(self.floater_enabled),
             input_backend=self.input_backend,
             sura_mode=self.sura_mode,
             capture_window_title=self.capture_window_title,
@@ -712,6 +718,10 @@ class Settings(BaseModel):
         supplied profile, so existing UI/controller code reading from
         the top-level sees the newly active tab's data.
         """
+        # Mirror floater_enabled into the top-level (legacy field) so
+        # callers reading settings.floater_enabled see the active tab's
+        # saved state. Per-tab persistence lives on p.floater_enabled.
+        self.floater_enabled = bool(p.floater_enabled)
         self.input_backend = p.input_backend
         self.sura_mode = p.sura_mode
         self.capture_window_title = p.capture_window_title

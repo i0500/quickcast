@@ -194,11 +194,6 @@ class AppWindow(AppShell):
         for cid, prof in self.settings.clients.items():
             self._client_tabs.set_enabled_dot(cid, bool(prof.enabled))
 
-        # Per-tab enable toggle — reflect active client's saved state and
-        # wire user toggle clicks back to the profile.
-        active_prof = self.settings.get_profile()
-        self.title_bar.set_tab_enabled(bool(active_prof.enabled))
-        self.title_bar.tab_enabled_toggled.connect(self._on_tab_enabled_toggled)
 
         # 5. Activity bar bottom items + master.
         self.section_changed.connect(self._on_section_changed)
@@ -496,20 +491,34 @@ class AppWindow(AppShell):
 
     def _all_controllers(self) -> dict:
         """Return {cid: MacroController} for every controller this window
-        knows about — the active one plus everything in standby_runtimes.
-        Used by _wire_controller_to_ui to register gated UI callbacks on
-        each so a tab swap doesn't freeze the dashboard.
+        knows about — the active one plus all standbys.
+
+        Maintains its own ``self._controllers`` dict (seeded from
+        controller._standby_runtimes on first call) so a tab swap doesn't
+        lose track of the previous active controller. Without this the
+        only place an active controller lives is ``self.controller``, and
+        the moment swap happens the old one becomes unreferenced.
         """
-        out = {}
+        # Lazy initialisation on first call (boot path).
+        cache = getattr(self, "_controllers", None)
+        if cache is None:
+            cache = {}
+            if self.controller is not None:
+                cid = getattr(self.controller, "client_id", "") or self.settings.active_client_id
+                cache[cid] = self.controller
+            sb = getattr(self.controller, "_standby_runtimes", {}) or {}
+            for cid, rt in sb.items():
+                c = rt.get("controller")
+                if c is not None and cid not in cache:
+                    cache[cid] = c
+            self._controllers = cache
+        # Always ensure self.controller is in the cache (in case a freshly
+        # built controller hasn't been registered yet).
         if self.controller is not None:
             cid = getattr(self.controller, "client_id", "") or self.settings.active_client_id
-            out[cid] = self.controller
-        sb = getattr(self.controller, "_standby_runtimes", {}) or {}
-        for cid, rt in sb.items():
-            c = rt.get("controller")
-            if c is not None and cid not in out:
-                out[cid] = c
-        return out
+            if cid not in cache or cache[cid] is not self.controller:
+                cache[cid] = self.controller
+        return cache
 
     # ───────── activity bar bottom items ─────────
     def _on_section_changed(self, sid: str) -> None:
@@ -648,27 +657,60 @@ class AppWindow(AppShell):
             return
         old_cid = self.settings.active_client_id
 
+        # Look up across the persistent cache, not the transient
+        # _standby_runtimes view — the previously-active controller
+        # lives in the cache after the first swap and would otherwise
+        # be invisible to subsequent swaps.
         controllers = self._all_controllers()
         new_controller = controllers.get(new_cid)
-        if new_controller is None:
-            NotificationCenter.toast(
-                f"'{self.settings.clients[new_cid].label}' 캡처 미설정 — "
-                f"먼저 게임창을 지정하세요",
-                level="warning", duration_ms=4000,
-            )
-            self._client_tabs.set_active(old_cid)
-            return
 
-        logger.info(f"🔀 클라 탭 전환: {old_cid} → {new_cid} (둘 다 가동 중)")
+        logger.info(
+            f"🔀 클라 탭 전환: {old_cid} → {new_cid} "
+            f"(controller={'있음' if new_controller else '없음'}, "
+            f"cache={list(controllers.keys())})"
+        )
 
         # 1. Active client id swap — sections reading settings.slots /
         # settings.pk now see the new tab's data on the next read.
+        # ALWAYS allowed; the UI transition has to work even when the
+        # new tab has no capture configured yet, otherwise the user has
+        # no way to navigate to the Capture page and pick a game window
+        # for that client (chicken-and-egg).
         self.settings.switch_client(new_cid)
 
-        # 2. Point self.controller at the new tab's runtime. Both
-        # controllers stay alive; this just changes which one drives the
-        # status bar / floater / input-backend hot-swap logic.
-        self.controller = new_controller
+        # 2. Point self.controller at the new tab's runtime if one exists.
+        # When None (capture unset), keep the previous controller alive
+        # for now — _hot_swap_capture will spin up a fresh controller
+        # for this client the moment the user picks a game window.
+        if new_controller is not None:
+            self.controller = new_controller
+            # Re-bind the UI callbacks so the dashboard preview / status
+            # bar pick up frames from the now-active controller. Without
+            # this the preview stays frozen on the previous tab's last
+            # frame (active gate inside the closure keeps the new
+            # controller's frames out of the mailbox until the cid is
+            # re-evaluated, which only happens after a fresh callback
+            # registration with the post-swap self.settings state).
+            self._wire_controller_to_ui()
+        else:
+            # Maybe the user pre-configured this tab's capture from the
+            # *other* tab (Capture page lists both clients now). If a
+            # window title is saved, try to spin up the controller right
+            # now so the tab is immediately usable.
+            if self.settings.get_profile(new_cid).capture_window_title:
+                try:
+                    self._hot_swap_capture()
+                except Exception:
+                    logger.exception("client-tab: auto hot-swap failed")
+                # _hot_swap_capture may have built+promoted a new controller.
+                if self.controller is not None and self.controller.client_id == new_cid:
+                    new_controller = self.controller
+            if new_controller is None:
+                NotificationCenter.toast(
+                    f"'{self.settings.clients[new_cid].label}' 캡처 미설정 — "
+                    f"캡처 페이지에서 게임창을 선택하세요",
+                    level="warning", duration_ms=5000,
+                )
         # Reset capture indicator so the next frame from the new tab
         # repaints the status bar with the right label.
         self._capture_seen = False
@@ -685,43 +727,32 @@ class AppWindow(AppShell):
             bus.alarm_list_changed.emit()
         except Exception:
             pass
-        new_hwnd = int(getattr(new_controller, "_auto_hwnd", 0) or 0)
-        new_title = getattr(new_controller, "_auto_title", "") or ""
-        if new_hwnd:
-            try:
-                bus.game_window_found.emit(new_hwnd, new_title)
-            except Exception:
-                pass
+        new_hwnd = (
+            int(getattr(new_controller, "_auto_hwnd", 0) or 0)
+            if new_controller is not None else 0
+        )
+        new_title = (
+            getattr(new_controller, "_auto_title", "") or ""
+            if new_controller is not None else ""
+        )
+        # Always emit — main.py's handler treats hwnd=0 as "detach floater"
+        # so a tab with no game window doesn't keep showing the previous
+        # tab's floater hovering over the wrong hwnd.
+        try:
+            bus.game_window_found.emit(new_hwnd, new_title)
+        except Exception:
+            pass
 
-        # 4. Refresh tab visuals (active highlight, ON-dots) + tab toggle.
+        # 4. Refresh tab visuals (active highlight, ON-dots).
         self._client_tabs.set_active(new_cid)
         for cid, prof in self.settings.clients.items():
             self._client_tabs.set_enabled_dot(cid, bool(prof.enabled))
-        self.title_bar.set_tab_enabled(bool(self.settings.get_profile().enabled))
 
         NotificationCenter.toast(
             f"🔀 {self.settings.clients[new_cid].label} 탭으로 전환됨",
             level="info", duration_ms=2500,
         )
         bus.settings_dirty.emit()
-
-    def _on_tab_enabled_toggled(self, on: bool) -> None:
-        """User toggled the per-tab enable switch in the title bar.
-
-        Writes back to the active client's ClientProfile.enabled and
-        refreshes the tab-strip dot indicator. The controller picks this
-        up on its next _tick_control (≤100 ms) via self.profile.enabled.
-        """
-        active_cid = self.settings.active_client_id
-        prof = self.settings.get_profile()
-        prof.enabled = bool(on)
-        # ClientTabs dot mirrors the saved state.
-        self._client_tabs.set_enabled_dot(active_cid, bool(on))
-        bus.settings_dirty.emit()
-        logger.info(
-            f"{'▶️' if on else '⏸️'} [{prof.label}] 탭 매크로 "
-            f"{'활성' if on else '일시정지'}"
-        )
 
     # ───────── connection toggles ─────────
     def _toggle_arduino(self) -> None:
@@ -1122,12 +1153,18 @@ class AppWindow(AppShell):
 
     # ───────── capture hot-swap ─────────
     def _hot_swap_capture(self) -> None:
-        """Swap controller.capture to the saved capture_window_title (live).
+        """Update the active client's capture to ``capture_window_title``.
 
-        Called when the user picks a new game window from the Capture
-        section. Tests PrintWindow first; falls back to mss WindowCapture
-        if the target app refuses (returns all-black). Updates the Win32
-        input backends to match.
+        Two paths:
+        - Active client already has a controller → swap its capture in
+          place (original behaviour).
+        - Active client has no controller yet (user switched to a fresh
+          tab and is picking its first game window) → build a new
+          controller bound to that client, register it in
+          standby_runtimes, promote to self.controller, and start it.
+
+        In both cases the Win32 input backends are re-targeted at the
+        new HWND and the floater receives ``game_window_found``.
         """
         if self.controller is None:
             return
@@ -1186,31 +1223,58 @@ class AppWindow(AppShell):
                 )
                 return
 
-        # Swap and tear down old.
+        # Locate (or build) the controller bound to the active client.
+        active_cid = self.settings.active_client_id
+        standby = getattr(self.controller, "_standby_runtimes", {}) or {}
+        target_controller = None
+        if self.controller.client_id == active_cid:
+            target_controller = self.controller
+        elif active_cid in standby:
+            target_controller = standby[active_cid].get("controller")
+
         try:
-            old = self.controller.capture
-            self.controller.capture = new_cap
-            try:
-                old.close()
-            except Exception:
-                pass
-            # Refresh Win32 input backends.
-            backends = getattr(self.controller, "_backends", {}) or {}
-            for name in ("postmessage", "attachinput"):
-                b = backends.get(name)
-                if b is not None and hasattr(b, "set_target"):
-                    b.set_target(hwnd, full_title)
-            self.controller._auto_hwnd = hwnd
-            self.controller._auto_title = full_title
+            if target_controller is None:
+                # ── Build a fresh controller for the active client ──
+                # This happens the first time the user picks a game window
+                # for the just-switched-to tab (e.g. client2 with no prior
+                # capture configured). Recognizer + Arduino are shared.
+                self._build_active_client_runtime(
+                    new_cap, hwnd, full_title, standby,
+                )
+                logger.success(
+                    f"🆕 [{self.settings.get_profile().label}] 신규 컨트롤러 빌드"
+                    f" → '{full_title}' ({rect.width}x{rect.height}, {used})"
+                )
+            else:
+                # ── Swap capture in place on the existing controller ──
+                old = target_controller.capture
+                target_controller.capture = new_cap
+                try:
+                    old.close()
+                except Exception:
+                    pass
+                backends = getattr(target_controller, "_backends", {}) or {}
+                for name in ("postmessage", "attachinput"):
+                    b = backends.get(name)
+                    if b is not None and hasattr(b, "set_target"):
+                        b.set_target(hwnd, full_title)
+                target_controller._auto_hwnd = hwnd
+                target_controller._auto_title = full_title
+                # If we updated a standby controller (active != self.controller),
+                # promote it so the UI now drives that tab.
+                if target_controller is not self.controller:
+                    self.controller = target_controller
+                    self._wire_controller_to_ui()
+                logger.success(
+                    f"🎯 [{self.settings.get_profile().label}] 캡처 전환: "
+                    f"{used} → '{full_title}' ({rect.width}x{rect.height})"
+                )
+
             self.status_bar.update_capture(
                 True, f"{full_title[:24]} {rect.width}×{rect.height}",
             )
             NotificationCenter.toast(
                 f"캡처 전환됨 ({used})", level="success", duration_ms=1800,
-            )
-            logger.success(
-                f"🎯 캡처 전환: {used} → '{full_title}' "
-                f"({rect.width}x{rect.height})"
             )
             # Broadcast so the floater (and anything else holding an
             # hwnd reference) re-attaches to the new target window.
@@ -1221,6 +1285,112 @@ class AppWindow(AppShell):
         except Exception:
             logger.exception("capture-swap: hot-swap failed")
             NotificationCenter.toast("캡처 전환 실패 — 로그 확인", level="danger")
+
+    def _build_active_client_runtime(
+        self, capture, hwnd: int, title: str, standby: dict,
+    ) -> None:
+        """Spin up a brand-new MacroController for the active client tab.
+
+        Used when the user enters a previously-empty tab and picks its
+        first game window. Recognizer is shared with the existing active
+        controller (same template targets), Arduino too (single physical
+        device). PostMessage/AttachInput are per-tab since they target
+        a tab-specific HWND.
+
+        After building: starts the new controller, slots it into
+        standby_runtimes under its client_id, also stashes the old active
+        controller into standby_runtimes under ITS id (so a tab swap
+        back can find it), and re-wires the UI callbacks.
+        """
+        from quickcast.core.controller import MacroController
+        from quickcast.slots.slot_manager import SlotManager
+        from quickcast.input_io.win32_input import (
+            AttachInputBackend, PostMessageBackend,
+        )
+
+        active_cid = self.settings.active_client_id
+        prof = self.settings.get_profile(active_cid)
+        old_ctrl = self.controller
+        old_cid = old_ctrl.client_id if old_ctrl is not None else ""
+
+        # Per-tab input backends targeted at the new HWND.
+        new_postmsg = PostMessageBackend()
+        new_attach = AttachInputBackend()
+        new_postmsg.set_target(hwnd, title)
+        new_attach.set_target(hwnd, title)
+
+        # Pick the user-selected backend from the profile; default to
+        # PostMessage. Arduino is shared from the old controller's pool.
+        old_backends = getattr(old_ctrl, "_backends", {}) or {}
+        arduino_backend = old_backends.get("arduino")
+        pick = new_postmsg
+        if prof.input_backend == "attachinput":
+            pick = new_attach
+        elif prof.input_backend == "arduino" and arduino_backend is not None:
+            pick = arduino_backend
+
+        new_sm = SlotManager()
+        new_ctrl = MacroController(
+            settings=self.settings,
+            capture=capture,
+            recognizer=old_ctrl.recognizer,   # shared (template targets are global)
+            slot_manager=new_sm,
+            input_backend=pick,
+            telegram=old_ctrl.telegram,
+            on_slot_state_changed=getattr(old_ctrl, "on_slot_state_changed", None),
+            client_id=active_cid,
+        )
+        new_ctrl._backends = {
+            "arduino": arduino_backend,
+            "postmessage": new_postmsg,
+            "attachinput": new_attach,
+        }
+        new_ctrl._auto_hwnd = hwnd
+        new_ctrl._auto_title = title
+
+        # Stash old controller into standby under its id (so a swap back
+        # to that tab can find a live runtime).
+        if old_ctrl is not None and old_cid and old_cid != active_cid:
+            standby[old_cid] = {
+                "profile": self.settings.get_profile(old_cid),
+                "capture": old_ctrl.capture,
+                "slot_manager": old_ctrl.slot_manager,
+                "postmsg": old_backends.get("postmessage"),
+                "attachinp": old_backends.get("attachinput"),
+                "auto_hwnd": int(getattr(old_ctrl, "_auto_hwnd", 0) or 0),
+                "auto_title": getattr(old_ctrl, "_auto_title", "") or "",
+                "controller": old_ctrl,
+            }
+
+        # Register the new controller under its own id too.
+        standby[active_cid] = {
+            "profile": prof,
+            "capture": capture,
+            "slot_manager": new_sm,
+            "postmsg": new_postmsg,
+            "attachinp": new_attach,
+            "auto_hwnd": hwnd,
+            "auto_title": title,
+            "controller": new_ctrl,
+        }
+        new_ctrl._standby_runtimes = standby
+
+        # Register in persistent cache + standby so tab swaps can find it.
+        if getattr(self, "_controllers", None) is None:
+            self._controllers = {}
+        self._controllers[active_cid] = new_ctrl
+        if old_ctrl is not None and old_cid:
+            self._controllers[old_cid] = old_ctrl
+
+        # Promote new as self.controller; re-wire UI callbacks for all.
+        self.controller = new_ctrl
+        self._wire_controller_to_ui()
+
+        # Start the new controller's capture/control threads.
+        try:
+            new_ctrl.start()
+        except Exception:
+            logger.exception("new client runtime: controller start failed")
 
     # ───────── tray ─────────
     def _build_tray(self) -> None:
