@@ -24,6 +24,10 @@ class TitleBar(QFrame):
     close_clicked = Signal()
     master_toggled = Signal(bool)
     floater_toggled = Signal(bool)
+    # Per-tab enable toggle — fires with the new state (True = this tab's
+    # macro is gated ON). Separate from master_toggled so two-client users
+    # can park one tab without flipping the global master.
+    tab_enabled_toggled = Signal(bool)
 
     HEIGHT = 44
 
@@ -56,6 +60,15 @@ class TitleBar(QFrame):
 
         # Master + Floating toggles — both styled identically (label + iOS toggle)
         from quickcast.ui.ios_toggle import IOSToggle
+
+        # Per-tab enable toggle — only meaningful when multi-client is in
+        # play. AppWindow wires it to active ClientProfile.enabled.
+        self.tab_enabled_label = QLabel("탭")
+        reactive(self.tab_enabled_label, lambda: f"color:{T.palette.text_secondary};")
+        self.tab_enabled_toggle = IOSToggle(width=40, height=22)
+        self.tab_enabled_toggle.toggled.connect(self.tab_enabled_toggled.emit)
+        h.addWidget(self.tab_enabled_label); h.addWidget(self.tab_enabled_toggle)
+        h.addSpacing(12)
 
         # Floating switch toggle — same iPhone-style as Master.
         self.floater_label = QLabel("Floating")
@@ -107,6 +120,13 @@ class TitleBar(QFrame):
     def set_master(self, on: bool) -> None:
         self._master = on
         self.master_toggle.set_state(on, animate=True)
+
+    def set_tab_enabled(self, on: bool) -> None:
+        """Mirror the active tab's ClientProfile.enabled state in the toggle
+        without re-emitting tab_enabled_toggled. Called by AppWindow when
+        the active client changes (tab swap) so the toggle position
+        matches the new tab's saved state."""
+        self.tab_enabled_toggle.set_state(on, animate=False)
 
     def _on_master_toggled(self, on: bool) -> None:
         self._master = on

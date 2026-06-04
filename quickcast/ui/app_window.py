@@ -194,6 +194,12 @@ class AppWindow(AppShell):
         for cid, prof in self.settings.clients.items():
             self._client_tabs.set_enabled_dot(cid, bool(prof.enabled))
 
+        # Per-tab enable toggle — reflect active client's saved state and
+        # wire user toggle clicks back to the profile.
+        active_prof = self.settings.get_profile()
+        self.title_bar.set_tab_enabled(bool(active_prof.enabled))
+        self.title_bar.tab_enabled_toggled.connect(self._on_tab_enabled_toggled)
+
         # 5. Activity bar bottom items + master.
         self.section_changed.connect(self._on_section_changed)
         self.master_toggled.connect(self._on_master_toggled)
@@ -687,16 +693,35 @@ class AppWindow(AppShell):
             except Exception:
                 pass
 
-        # 4. Refresh tab visuals (active highlight, ON-dots).
+        # 4. Refresh tab visuals (active highlight, ON-dots) + tab toggle.
         self._client_tabs.set_active(new_cid)
         for cid, prof in self.settings.clients.items():
             self._client_tabs.set_enabled_dot(cid, bool(prof.enabled))
+        self.title_bar.set_tab_enabled(bool(self.settings.get_profile().enabled))
 
         NotificationCenter.toast(
             f"🔀 {self.settings.clients[new_cid].label} 탭으로 전환됨",
             level="info", duration_ms=2500,
         )
         bus.settings_dirty.emit()
+
+    def _on_tab_enabled_toggled(self, on: bool) -> None:
+        """User toggled the per-tab enable switch in the title bar.
+
+        Writes back to the active client's ClientProfile.enabled and
+        refreshes the tab-strip dot indicator. The controller picks this
+        up on its next _tick_control (≤100 ms) via self.profile.enabled.
+        """
+        active_cid = self.settings.active_client_id
+        prof = self.settings.get_profile()
+        prof.enabled = bool(on)
+        # ClientTabs dot mirrors the saved state.
+        self._client_tabs.set_enabled_dot(active_cid, bool(on))
+        bus.settings_dirty.emit()
+        logger.info(
+            f"{'▶️' if on else '⏸️'} [{prof.label}] 탭 매크로 "
+            f"{'활성' if on else '일시정지'}"
+        )
 
     # ───────── connection toggles ─────────
     def _toggle_arduino(self) -> None:
