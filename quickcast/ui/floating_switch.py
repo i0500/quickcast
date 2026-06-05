@@ -118,8 +118,14 @@ class FloatingSwitch(QWidget):
 
     def __init__(self, parent: QWidget | None = None, client_id: str = "") -> None:
         super().__init__(parent)
+        # NOTE: deliberately NOT Qt.WindowStaysOnTopHint. The floater
+        # rides the game window's z-order via SetWindowPos on every
+        # _track() tick — so when the user clicks another app over the
+        # game, the floater goes behind too (same stack), and when the
+        # user clicks back on the game both rise together. Topmost would
+        # break that "한 봉처럼" coupling.
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+            Qt.FramelessWindowHint | Qt.Tool
             | Qt.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -524,6 +530,22 @@ class FloatingSwitch(QWidget):
             self._target_hwnd = None
             self.hide()
             return
+
+        # Minimized game window → hide (no point showing the floater
+        # for a window the user can't see anyway). All other cases let
+        # the z-order coupling below decide.
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            is_min = bool(user32.IsIconic(self._target_hwnd))
+            is_vis = bool(user32.IsWindowVisible(self._target_hwnd))
+        except Exception:
+            is_min = False; is_vis = True
+        if is_min or not is_vis:
+            if self.isVisible():
+                self.hide()
+            return
+
         rect = get_client_rect_screen(self._target_hwnd) or get_window_rect(self._target_hwnd)
         if rect is None:
             return
@@ -542,6 +564,28 @@ class FloatingSwitch(QWidget):
             ty = int(rect.top + ry * h)
         if (self.x(), self.y()) != (tx, ty):
             self.move(tx, ty)
+        if not self.isVisible():
+            self.show()
+
+        # Z-order coupling — pin the floater right above the game window.
+        # If another app comes between (e.g. user clicks a browser), the
+        # browser sits above the game AND above this floater, so the
+        # floater visually goes "behind" too. The moment the user clicks
+        # the game back to top, both rise together. This replaces the
+        # previous WindowStaysOnTopHint behaviour where the floater
+        # stayed above everything regardless of game z-order.
+        try:
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            fl_hwnd = int(self.winId())
+            user32.SetWindowPos(
+                fl_hwnd, int(self._target_hwnd),
+                0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass
 
     # ───────── drag handlers ─────────
     def _on_drag_start(self, _global_pos: QPoint) -> None:

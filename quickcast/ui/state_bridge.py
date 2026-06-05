@@ -105,6 +105,15 @@ def wire_persistence(save_now) -> None:
         if slot is not None:
             slot.use = on
             save_now()
+        # Cooldown reset on every toggle (both ON and OFF) so the user's
+        # next ON fires immediately instead of waiting for the previous
+        # cooldown to expire. AppWindow._reset_slot_cooldown handles the
+        # active controller's slot_manager.
+        try:
+            from quickcast.ui.design.signals import bus as _b
+            _b.slot_cooldown_reset_request.emit(sid)
+        except Exception:
+            pass
 
     slot_state.slot_toggled.connect(_on_slot_toggled)
 
