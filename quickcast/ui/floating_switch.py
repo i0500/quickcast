@@ -594,24 +594,29 @@ class FloatingSwitch(QWidget):
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
             SWP_NOACTIVATE = 0x0010
+            SWP_NOREDRAW = 0x0008
+            SWP_NOSENDCHANGING = 0x0400
             GW_HWNDPREV = 3
             fl_hwnd = int(self.winId())
             if not fl_hwnd:
                 return    # widget not yet native — retry next tick
             tgt_hwnd = int(self._target_hwnd)
-            prev_above = user32.GetWindow(tgt_hwnd, GW_HWNDPREV) or 0
-            # If GetWindow returned the floater itself (we're already
-            # positioned right above target), no work to do.
-            if prev_above == fl_hwnd:
-                pass
+            prev_above_target = user32.GetWindow(tgt_hwnd, GW_HWNDPREV) or 0
+            # Skip the SetWindowPos call entirely when we're already
+            # positioned correctly. The flicker came from issuing a
+            # z-order update every 200 ms even when nothing changed —
+            # each call triggers Windows' compositor repaint cycle.
+            if prev_above_target == fl_hwnd:
+                pass    # already directly above game window
             else:
-                # hWndInsertAfter=NULL (0) puts the window at the top of
-                # the z-order, which is exactly what we want when the
-                # game is currently topmost (prev_above == 0).
+                # NOREDRAW + NOSENDCHANGING suppresses both the immediate
+                # repaint and the WM_WINDOWPOSCHANGING notification, so
+                # the actual z-order shift happens without a paint storm.
                 user32.SetWindowPos(
-                    fl_hwnd, prev_above,
+                    fl_hwnd, prev_above_target,
                     0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                    | SWP_NOREDRAW | SWP_NOSENDCHANGING,
                 )
         except Exception:
             pass
