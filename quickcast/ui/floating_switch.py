@@ -118,14 +118,15 @@ class FloatingSwitch(QWidget):
 
     def __init__(self, parent: QWidget | None = None, client_id: str = "") -> None:
         super().__init__(parent)
-        # NOTE: deliberately NOT Qt.WindowStaysOnTopHint. The floater
-        # rides the game window's z-order via SetWindowPos on every
-        # _track() tick — so when the user clicks another app over the
-        # game, the floater goes behind too (same stack), and when the
-        # user clicks back on the game both rise together. Topmost would
-        # break that "한 봉처럼" coupling.
+        # WindowStaysOnTopHint — 가장 robust한 "게임창 위 상시 표시"
+        # 방법. owner-window 패턴(GWLP_HWNDPARENT) 시도했으나 Qt가
+        # show/hide/mouse-event 시 owner를 자체적으로 재설정해서 매번
+        # 우리 SetWindowLongPtr 덮어쓰고 → 플로터가 사용자 클릭마다
+        # 게임 뒤로 갔다 왔다 함. Topmost가 PySide6에서 유일하게
+        # 안정적인 anchor. 단점은 다른 fullscreen 창 위로도 올라오는
+        # 거지만 owner 패턴 깨짐보다 사용자 영향 적음.
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.Tool
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
             | Qt.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -250,24 +251,6 @@ class FloatingSwitch(QWidget):
         self._tracker.start()
         self._track()
         self.show()
-        # Win32 owner relationship — once set, Windows automatically
-        # keeps the owned floater above its owner in z-order, hides it
-        # when the owner is minimised, and lifts it together when the
-        # owner is raised. Replaces the per-tick SetWindowPos pattern
-        # that flickered in the PyInstaller build.
-        try:
-            import ctypes
-            from ctypes import wintypes, c_int, c_void_p
-            user32 = ctypes.windll.user32
-            fn = (user32.SetWindowLongPtrW
-                  if ctypes.sizeof(c_void_p) == 8
-                  else user32.SetWindowLongW)
-            fn.argtypes = [wintypes.HWND, c_int, c_void_p]
-            fn.restype = c_void_p
-            GWLP_HWNDPARENT = -8
-            fn(int(self.winId()), GWLP_HWNDPARENT, int(hwnd))
-        except Exception:
-            pass
 
     def detach(self) -> None:
         self._target_hwnd = None
@@ -589,65 +572,13 @@ class FloatingSwitch(QWidget):
             if not self.isVisible():
                 self.show()
 
-        # Z-order coupling — owner pattern set in attach_to(). Qt's
-        # show/hide and various platform events occasionally CLEAR the
-        # GWLP_HWNDPARENT we wrote, dropping the floater back into the
-        # global z-order (so it ends up behind the game on the next
-        # focus change). Re-establish the owner relationship every tick
-        # IF (and only if) it diverged — same lookup → 1 SetWindowLong
-        # only when needed. No paint storm: SetWindowLongPtr never
-        # triggers a repaint by itself, unlike SetWindowPos.
-        try:
-            import ctypes
-            from ctypes import wintypes, c_int, c_void_p
-            user32 = ctypes.windll.user32
-            is_64 = (ctypes.sizeof(c_void_p) == 8)
-            get_fn = (user32.GetWindowLongPtrW if is_64
-                      else user32.GetWindowLongW)
-            set_fn = (user32.SetWindowLongPtrW if is_64
-                      else user32.SetWindowLongW)
-            get_fn.argtypes = [wintypes.HWND, c_int]
-            get_fn.restype = c_void_p
-            set_fn.argtypes = [wintypes.HWND, c_int, c_void_p]
-            set_fn.restype = c_void_p
-            GWLP_HWNDPARENT = -8
-            fl_hwnd = int(self.winId())
-            tgt_hwnd = int(self._target_hwnd)
-            if fl_hwnd and tgt_hwnd:
-                current = get_fn(fl_hwnd, GWLP_HWNDPARENT) or 0
-                if int(current) != tgt_hwnd:
-                    set_fn(fl_hwnd, GWLP_HWNDPARENT, tgt_hwnd)
-        except Exception:
-            pass
+        # Z-order: WindowStaysOnTopHint handles "always above the game"
+        # automatically. No per-tick SetWindowPos / SetWindowLongPtr.
 
     # ───────── drag handlers ─────────
     def _on_drag_start(self, _global_pos: QPoint) -> None:
         self._drag_origin = self.pos()
         self._dragging = True
-        # Reassert owner immediately — the mouse-down click that started
-        # the drag occasionally clears GWLP_HWNDPARENT, and waiting for
-        # the next _track tick (~200 ms) makes the floater visually
-        # vanish behind the game during the drag's first frames.
-        try:
-            self._restore_owner_now()
-        except Exception:
-            pass
-
-    def _restore_owner_now(self) -> None:
-        if self._target_hwnd is None:
-            return
-        import ctypes
-        from ctypes import wintypes, c_int, c_void_p
-        user32 = ctypes.windll.user32
-        is_64 = (ctypes.sizeof(c_void_p) == 8)
-        set_fn = (user32.SetWindowLongPtrW if is_64
-                  else user32.SetWindowLongW)
-        set_fn.argtypes = [wintypes.HWND, c_int, c_void_p]
-        set_fn.restype = c_void_p
-        GWLP_HWNDPARENT = -8
-        fl_hwnd = int(self.winId())
-        if fl_hwnd:
-            set_fn(fl_hwnd, GWLP_HWNDPARENT, int(self._target_hwnd))
 
     def _on_drag_move(self, global_pos: QPoint) -> None:
         new_x = global_pos.x() - self.handle.x() - self.handle.width() // 2
