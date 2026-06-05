@@ -764,14 +764,39 @@ def _build_buff_ocr_card(state: dict, parent: "QWidget") -> "QWidget":
     reactive(toggle_hint, lambda: f"color:{T.palette.text_tertiary}; font-size:11px;")
 
     def _on_toggle(on: bool) -> None:
+        from quickcast.config import ROI_DEFAULTS
         changed = False
         if rec.trigger_town_idle != on:
             rec.trigger_town_idle = on; changed = True
         if buff_obj is not None and bool(buff_obj.enabled) != on:
             buff_obj.enabled = on; changed = True
+        # Auto-seed ROI on first ON so the box appears immediately.
+        if on and int(getattr(mock_settings, "buff_text_cap_w", 0) or 0) <= 0:
+            x, y, w, h = ROI_DEFAULTS.get("buff_text", (8, 66, 28, 24))
+            mock_settings.buff_text_cap.x = int(x)
+            mock_settings.buff_text_cap.y = int(y)
+            mock_settings.buff_text_cap_w = int(w)
+            mock_settings.buff_text_cap_h = int(h)
+            changed = True
         if changed:
             bus.settings_dirty.emit()
     toggle.toggled.connect(_on_toggle)
+
+    # Two-way sync — sidebar "마을 대기" / external writes to
+    # rec.trigger_town_idle or buff.enabled keep this toggle in lockstep.
+    def _resync_buff_toggle() -> None:
+        try:
+            cur = bool(rec.trigger_town_idle) and bool(
+                buff_obj is not None and buff_obj.enabled
+            )
+            if toggle.is_on() != cur:
+                toggle.set_state(cur, animate=True)
+        except RuntimeError:
+            try:
+                bus.settings_dirty.disconnect(_resync_buff_toggle)
+            except Exception:
+                pass
+    bus.settings_dirty.connect(_resync_buff_toggle)
 
     toggle_row.addWidget(toggle)
     toggle_row.addWidget(toggle_lbl)

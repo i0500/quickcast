@@ -590,6 +590,72 @@ def _sidebar_quick_toggle(label: str, target_obj, attr: str) -> QWidget:
     return row
 
 
+def _sidebar_town_idle_toggle() -> QWidget:
+    """마을 대기 사용 토글 — capture_section buff OCR 카드의 마스터 토글과
+    의미 동일하게 ``recovery.trigger_town_idle`` + ``buff.enabled`` 두 플래그를
+    동시에 set. 토글 ON 시 buff_text_cap이 0×0이면 ROI_DEFAULTS의 기본
+    좌표로 자동 시드 — 사용자가 캡처 페이지에서 일일이 좌표를 안 잡아도
+    ROI 박스가 즉시 보임. 양방향 sync(_resync) + dead-widget 가드.
+    """
+    from quickcast.config import ROI_DEFAULTS
+    from quickcast.ui.design.signals import bus as _bus
+    from quickcast.ui.sections._mock_state import mock_settings as _ms
+    row = QWidget()
+    h = QHBoxLayout(row); h.setContentsMargins(12, 4, 12, 4); h.setSpacing(8)
+    lbl = QLabel("마을 대기")
+    reactive(lbl, lambda: f"color:{T.palette.text_primary}; font-size:13px;")
+    sw = IOSToggle(width=36, height=18)
+
+    def _is_on() -> bool:
+        rec = getattr(_ms, "recovery", None)
+        buff = getattr(_ms, "buff", None)
+        return (bool(getattr(rec, "trigger_town_idle", False))
+                and bool(getattr(buff, "enabled", False)))
+
+    sw.set_state(_is_on(), animate=False)
+
+    def _on(on: bool) -> None:
+        rec = getattr(_ms, "recovery", None)
+        buff = getattr(_ms, "buff", None)
+        changed = False
+        if rec is not None and bool(rec.trigger_town_idle) != on:
+            rec.trigger_town_idle = on
+            changed = True
+        if buff is not None and bool(buff.enabled) != on:
+            buff.enabled = on
+            changed = True
+        # Auto-seed buff_text_cap when turning ON for the first time so
+        # the ROI box is visible immediately. User can still refine in
+        # the Capture page; this just gives a sensible starting box.
+        if on and int(getattr(_ms, "buff_text_cap_w", 0) or 0) <= 0:
+            x, y, w, h_ = ROI_DEFAULTS.get("buff_text", (8, 66, 28, 24))
+            _ms.buff_text_cap.x = int(x)
+            _ms.buff_text_cap.y = int(y)
+            _ms.buff_text_cap_w = int(w)
+            _ms.buff_text_cap_h = int(h_)
+            changed = True
+        if changed:
+            _bus.settings_dirty.emit()
+    sw.toggled.connect(_on)
+
+    def _resync() -> None:
+        try:
+            cur = _is_on()
+            if sw.is_on() != cur:
+                sw.set_state(cur, animate=True)
+        except RuntimeError:
+            try:
+                _bus.slot_state_refresh.disconnect(_resync)
+                _bus.settings_dirty.disconnect(_resync)
+            except Exception:
+                pass
+    _bus.slot_state_refresh.connect(_resync)
+    _bus.settings_dirty.connect(_resync)
+
+    h.addWidget(lbl); h.addStretch(1); h.addWidget(sw)
+    return row
+
+
 def _sidebar_overlay_master_toggle(label: str) -> QWidget:
     """오버레이 자동닫기 마스터 토글 — settings.overlay_closes[*].enabled를
     일괄 ON/OFF. dict 내부 OverlayClose 객체는 in-place mutate로 reference
@@ -670,7 +736,7 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
         sv.addWidget(_sidebar_quick_toggle("아이템 획득 닫기", _ovc["item_acquired"], "enabled"))
     if "blood_pledge" in _ovc:
         sv.addWidget(_sidebar_quick_toggle("혈맹 축복 닫기", _ovc["blood_pledge"], "enabled"))
-    sv.addWidget(_sidebar_quick_toggle("버프 카운트", _ms.buff,   "enabled"))
+    sv.addWidget(_sidebar_town_idle_toggle())
 
     sk_head = QLabel("스킬 토글")
     reactive(sk_head, lambda: (
