@@ -660,7 +660,16 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
     sv.addWidget(_sidebar_quick_toggle("PK 대응",  _ms.pk,       "use"))
     sv.addWidget(_sidebar_quick_toggle("물약 대응", _ms.potion,   "use"))
     sv.addWidget(_sidebar_quick_toggle("사냥 복귀", _ms.recovery, "enabled"))
-    sv.addWidget(_sidebar_overlay_master_toggle("오버레이 닫기"))
+    # 오버레이 자동 닫기 — 각 종류별 개별 토글. capture_section의 오버레이
+    # 카드와 객체 reference 공유(in-place mutate)이라 양방향 즉시 동기화.
+    # overlay_closes dict의 해당 키가 없는 클라는 토글이 무동작 (rare).
+    _ovc = getattr(_ms, "overlay_closes", None) or {}
+    if "pet_whistle" in _ovc:
+        sv.addWidget(_sidebar_quick_toggle("펫 호루라기 닫기", _ovc["pet_whistle"], "enabled"))
+    if "item_acquired" in _ovc:
+        sv.addWidget(_sidebar_quick_toggle("아이템 획득 닫기", _ovc["item_acquired"], "enabled"))
+    if "blood_pledge" in _ovc:
+        sv.addWidget(_sidebar_quick_toggle("혈맹 축복 닫기", _ovc["blood_pledge"], "enabled"))
     sv.addWidget(_sidebar_quick_toggle("버프 카운트", _ms.buff,   "enabled"))
 
     sk_head = QLabel("스킬 토글")
