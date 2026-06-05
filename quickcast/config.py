@@ -830,6 +830,26 @@ class Settings(BaseModel):
         self.active_client_id = client_id
         return True
 
+    # ClientProfile-compat properties — let callers use Settings (the
+    # active mirror) anywhere a ClientProfile is expected. This is how
+    # MacroController.profile returns ``self.settings`` for the active
+    # client so UI edits reach the controller without a tab swap.
+    @property
+    def label(self) -> str:
+        prof = self.clients.get(self.active_client_id)
+        return (prof.label if prof else "") or self.active_client_id
+
+    @property
+    def enabled(self) -> bool:
+        prof = self.clients.get(self.active_client_id)
+        return bool(prof.enabled) if prof else True
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        prof = self.clients.get(self.active_client_id)
+        if prof is not None:
+            prof.enabled = bool(value)
+
     def get_profile(self, client_id: str | None = None) -> "ClientProfile":
         """Return the ClientProfile for ``client_id`` (default: active).
 

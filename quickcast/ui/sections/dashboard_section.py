@@ -902,12 +902,51 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
     lock_btn.toggled.connect(_on_lock_toggled)
 
     # ── Log below preview ──
-    # QPlainTextEdit gives us drag-select + Ctrl+C + native context
-    # menu out-of-the-box, which the previous QLabel-per-row layout
-    # couldn't do. Read-only flag prevents typing; we use append() so
-    # auto-scroll-on-bottom is the default Qt behaviour.
-    from PySide6.QtWidgets import QPlainTextEdit
+    # QPlainTextEdit gives us drag-select + Ctrl+C + native context menu
+    # out-of-the-box. Multi-client: a small [전체][클라1][클라2] filter
+    # strip on top routes each log line by its `[클라명]` prefix into
+    # one of 3 ring buffers, and the view shows only the active filter's
+    # buffer. Main tab swap auto-syncs the filter (사용자가 수동 클릭한
+    # 직후엔 그 필터 유지 — 다음 main swap에 다시 sync).
+    from PySide6.QtWidgets import QPlainTextEdit, QPushButton
+    from collections import deque
     log_card = Card("")
+
+    # Filter strip
+    log_filter_row = QHBoxLayout()
+    log_filter_row.setContentsMargins(0, 0, 0, 4)
+    log_filter_row.setSpacing(6)
+    _filter_state = {"current": "전체"}   # closure-mutable filter selector
+
+    _filter_buttons: dict[str, QPushButton] = {}
+    for _lbl in ("전체", "클라1", "클라2"):
+        _b = QPushButton(_lbl)
+        _b.setCheckable(True)
+        _b.setFixedHeight(22)
+        _b.setCursor(Qt.PointingHandCursor)
+        _filter_buttons[_lbl] = _b
+        log_filter_row.addWidget(_b)
+    log_filter_row.addStretch(1)
+    log_card.add(log_filter_row)
+    _filter_buttons["전체"].setChecked(True)
+
+    def _restyle_filter_buttons() -> None:
+        pal = T.palette
+        for _k, _btn in _filter_buttons.items():
+            on = _btn.isChecked()
+            _btn.setStyleSheet(
+                f"QPushButton {{ background: "
+                f"{pal.accent_subtle if on else 'transparent'};"
+                f" color: {pal.text_primary if on else pal.text_secondary};"
+                f" border: 1px solid "
+                f"{pal.accent_default if on else 'transparent'};"
+                f" border-radius: 4px; padding: 1px 10px; font-size: 11px; }}"
+                f"QPushButton:hover {{ background: {pal.bg_hover};"
+                f" color: {pal.text_primary}; }}"
+            )
+    _restyle_filter_buttons()
+    bus.theme_changed.connect(_restyle_filter_buttons)
+
     log_view = QPlainTextEdit()
     log_view.setReadOnly(True)
     log_view.setMaximumBlockCount(500)        # ring-buffer-style cap
@@ -928,21 +967,84 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
     log_card.add(log_view)
     v.addWidget(log_card)
 
-    import time as _time_mod
-    from quickcast.ui.design.signals import bus as _log_bus
-    def _on_log_entry(level: str, message: str) -> None:
+    # Per-filter ring buffers (timestamped lines). 전체 holds EVERY line;
+    # 클라1/클라2 only hold lines whose message starts with the matching
+    # `[클라X]` prefix (or contains `[클라X] ` after the emoji prefix).
+    _LOG_BUFS: dict[str, deque] = {
+        "전체": deque(maxlen=500),
+        "클라1": deque(maxlen=500),
+        "클라2": deque(maxlen=500),
+    }
+
+    def _classify(msg: str) -> str:
+        """Return '클라1' / '클라2' / '' for shared messages. Looks for
+        the explicit ``[클라1]`` / ``[클라2]`` token anywhere — the
+        controller / slot_manager add this after the emoji prefix.
+        """
+        if "[클라1]" in msg:
+            return "클라1"
+        if "[클라2]" in msg:
+            return "클라2"
+        return ""
+
+    def _redraw_view() -> None:
+        """Repopulate log_view from the currently-selected filter's buffer."""
         try:
-            # Capture bottom-state BEFORE append so user-initiated
-            # scroll-up doesn't get yanked back to bottom by new lines.
             sb = log_view.verticalScrollBar()
             was_at_bottom = sb.value() >= sb.maximum() - 4
-            ts = _time_mod.strftime("%H:%M:%S")
-            log_view.appendPlainText(f"{ts}  {message}")
+            log_view.clear()
+            for line in _LOG_BUFS[_filter_state["current"]]:
+                log_view.appendPlainText(line)
             if was_at_bottom:
                 QTimer.singleShot(0, lambda b=sb: b.setValue(b.maximum()))
         except Exception:
             pass
+
+    def _set_filter(label: str) -> None:
+        if label not in _LOG_BUFS:
+            return
+        _filter_state["current"] = label
+        for _k, _btn in _filter_buttons.items():
+            _btn.setChecked(_k == label)
+        _restyle_filter_buttons()
+        _redraw_view()
+
+    for _lbl, _btn in _filter_buttons.items():
+        _btn.clicked.connect(lambda _=False, _l=_lbl: _set_filter(_l))
+
+    import time as _time_mod
+    from quickcast.ui.design.signals import bus as _log_bus
+
+    def _on_log_entry(level: str, message: str) -> None:
+        try:
+            ts = _time_mod.strftime("%H:%M:%S")
+            line = f"{ts}  {message}"
+            # Always store in 전체. Classify into 클라1/2 if prefixed.
+            _LOG_BUFS["전체"].append(line)
+            klass = _classify(message)
+            if klass:
+                _LOG_BUFS[klass].append(line)
+            # Only append to the visible view if it matches the current filter.
+            cur = _filter_state["current"]
+            if cur == "전체" or cur == klass:
+                sb = log_view.verticalScrollBar()
+                was_at_bottom = sb.value() >= sb.maximum() - 4
+                log_view.appendPlainText(line)
+                if was_at_bottom:
+                    QTimer.singleShot(0, lambda b=sb: b.setValue(b.maximum()))
+        except Exception:
+            pass
     _log_bus.log_entry.connect(_on_log_entry)
+
+    # Auto-sync the log filter to the active client tab. Inactive tab's
+    # log lines still pile up in the matching ring buffer — user can
+    # manually click 전체/클라1/클라2 to scroll through them.
+    def _on_client_changed_filter(cid: str) -> None:
+        # client_id ("client1"/"client2") → label ("클라1"/"클라2")
+        mapped = "클라1" if cid == "client1" else ("클라2" if cid == "client2" else "")
+        if mapped:
+            _set_filter(mapped)
+    bus.client_changed.connect(_on_client_changed_filter)
 
     # Wire fullscreen button — opens a borderless window that MIRRORS
     # the dashboard preview's real captured frames (not a fresh

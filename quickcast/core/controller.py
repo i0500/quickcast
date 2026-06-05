@@ -87,14 +87,22 @@ class MacroController:
 
     # ───────── client-scoped data ─────────
     @property
-    def profile(self) -> ClientProfile:
-        """Return the ClientProfile this controller is bound to.
+    def profile(self):
+        """Return this controller's client data source.
 
-        Resolved every call (instead of cached at __init__) so that a
-        future tab-rename or programmatic profile swap is picked up
-        without restarting the controller. Cost is one dict lookup per
-        frame — negligible at our 10-30 fps cadence.
+        For the ACTIVE client tab: returns ``self.settings`` directly so
+        that real-time UI edits (combat sliders, capture ROI drags) reach
+        this controller on the very next tick — no tab-swap round trip
+        required. Settings exposes ClientProfile-compatible properties
+        (label, enabled, pk, potion, slots, ...) so callers can treat
+        both return types identically.
+
+        For STANDBY clients: returns ``settings.clients[client_id]``,
+        the snapshot saved on the last active-tab swap. This stays
+        valid until the user swaps to that tab and edits something.
         """
+        if self.client_id == self.settings.active_client_id:
+            return self.settings
         return self.settings.get_profile(self.client_id)
 
     @property
@@ -565,9 +573,10 @@ class MacroController:
             if below:
                 if self._town_idle_started_at is None:
                     self._town_idle_started_at = now_t
+                    _tag = getattr(self.profile, "label", "") or self.client_id
                     logger.info(
-                        f"⏳ 마을 대기 감지 시작 — 버프 카운트={analysis.buff_count}"
-                        f" < {threshold_n}"
+                        f"⏳ [{_tag}] 마을 대기 감지 시작 — 버프 카운트="
+                        f"{analysis.buff_count} < {threshold_n}"
                     )
                 elapsed = now_t - self._town_idle_started_at
                 threshold_s = max(1.0, float(rec.town_idle_seconds))
@@ -618,8 +627,9 @@ class MacroController:
             handled.add(triggered_by)
         # Need a known game HWND for the click coords to mean anything.
         hwnd = int(getattr(self, "_auto_hwnd", 0) or 0)
+        _tag = getattr(self.profile, "label", "") or self.client_id
         if not hwnd:
-            logger.warning("⚠️ 사냥터 복귀 트리거됐지만 게임창 미선택")
+            logger.warning(f"⚠️ [{_tag}] 사냥터 복귀 트리거됐지만 게임창 미선택")
             return
 
         self.state._last_recovery_at = time.monotonic()
@@ -630,7 +640,7 @@ class MacroController:
                 h, w = self._latest_frame.image.shape[:2]
                 frame_size = (int(w), int(h))
         logger.info(
-            f"🏃 사냥터 복귀 시작 ({triggered_by})  "
+            f"🏃 [{_tag}] 사냥터 복귀 시작 ({triggered_by})  "
             f"{rec.start_delay_seconds}초 대기 → {len(rec.steps)}단계 실행"
         )
         threading.Thread(

@@ -61,6 +61,8 @@ class SlotManager:
             profile = settings.get_profile()
         events: list[FireEvent] = []
         now = time.monotonic()
+        _tag = getattr(profile, "label", "") or ""
+        _prefix = f"[{_tag}] " if _tag else ""
 
         # ───── ordinary slots (sorted: 1..9, 0, then 11+) ─────
         active_ids: set[str] = set()
@@ -101,12 +103,12 @@ class SlotManager:
                 slot.use = False
             if sustain > 0.0:
                 logger.info(
-                    f"🎯 {slot.label}  키:{slot.key} ×{slot.count}  "
+                    f"🎯 {_prefix}{slot.label}  키:{slot.key} ×{slot.count}  "
                     f"(HP {analysis.hp}%, MP {analysis.mp}%, 유지 {held:.1f}s)"
                 )
             else:
                 logger.info(
-                    f"🎯 {slot.label}  키:{slot.key} ×{slot.count}  "
+                    f"🎯 {_prefix}{slot.label}  키:{slot.key} ×{slot.count}  "
                     f"(HP {analysis.hp}%, MP {analysis.mp}%)"
                 )
 
@@ -137,12 +139,12 @@ class SlotManager:
                         pk.use = False
                     if sustain > 0.0:
                         logger.info(
-                            f"⚔️ PK 대응  키:{pk.key} ×{pk.count}  "
+                            f"⚔️ {_prefix}PK 대응  키:{pk.key} ×{pk.count}  "
                             f"(HP {analysis.hp}%, 유지 {held:.1f}s)"
                         )
                     else:
                         logger.info(
-                            f"⚔️ PK 대응  키:{pk.key} ×{pk.count}  (HP {analysis.hp}%)"
+                            f"⚔️ {_prefix}PK 대응  키:{pk.key} ×{pk.count}  (HP {analysis.hp}%)"
                         )
 
         # ───── Potion-empty slot (one-shot regardless of repeat) ─────
@@ -169,12 +171,12 @@ class SlotManager:
                 self._cond_first_seen.pop(self.POTION_ID, None)
                 if sustain > 0.0:
                     logger.info(
-                        f"🧪 물약 부족 → 귀환 키:{potion.key} ×{potion.count}  "
+                        f"🧪 {_prefix}물약 부족 → 귀환 키:{potion.key} ×{potion.count}  "
                         f"(HP {analysis.hp}%, 유지 {held:.1f}s)"
                     )
                 else:
                     logger.info(
-                        f"🧪 물약 부족 → 귀환 키:{potion.key} ×{potion.count}  "
+                        f"🧪 {_prefix}물약 부족 → 귀환 키:{potion.key} ×{potion.count}  "
                         f"(HP {analysis.hp}%)"
                     )
 
