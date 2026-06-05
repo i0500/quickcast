@@ -166,8 +166,23 @@ class MacroController:
             if self.state.recovery_in_progress:
                 self.state.recovery_stop.set()
             self.state._last_recovery_at = 0.0
+            # Reset cooldowns + town-idle timer on OFF too so the user's
+            # mental model is consistent: macro paused = state cleared.
+            # Without this, OFF → ON 짧은 간격일 때 slot cooldown 카운터가
+            # 남아있는 채로 보였다(visual + 다음 ON 시점까지 fire 막힘).
+            try:
+                self.slot_manager.cooldown.reset()
+            except Exception:
+                pass
+            self.state.recovery_handled.clear()
+            self._town_idle_started_at = None
+            # 슬롯 sustain 누적 타이머도 OFF 시 즉시 클리어.
+            try:
+                self.slot_manager.reset_sustain()
+            except Exception:
+                pass
             tag = getattr(prof, "label", "") or self.client_id
-            logger.info(f"🔴 [{tag}] 매크로 OFF")
+            logger.info(f"🔴 [{tag}] 매크로 OFF (쿨다운/sustain 초기화)")
 
     def set_master_switch(self, on: bool) -> None:
         """Legacy alias — kept for any callers that still poke the

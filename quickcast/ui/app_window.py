@@ -231,6 +231,12 @@ class AppWindow(AppShell):
         # Capture starts as 'waiting' — will flip to True on first frame.
         self._capture_seen = False
 
+        # Floater toggle (or any external client.enabled flip) on the
+        # active tab — drive the same 3-second grace countdown UI as the
+        # titlebar Master toggle so the user gets visual confirmation
+        # ("3 → 2 → 1 → 가동") regardless of which control they used.
+        bus.client_enable_changed.connect(self._on_client_enable_changed_grace)
+
         # Wire UI-driven connect/disconnect requests.
         bus.arduino_connect_request.connect(self._toggle_arduino)
         bus.telegram_connect_request.connect(self._toggle_telegram)
@@ -786,6 +792,20 @@ class AppWindow(AppShell):
             level="info", duration_ms=2500,
         )
         bus.settings_dirty.emit()
+
+    def _on_client_enable_changed_grace(self, cid: str, on: bool) -> None:
+        """Drive the dashboard grace-countdown UI when the active tab's
+        ClientProfile.enabled flips from outside the titlebar Master
+        toggle (typically a floater click). Only acts when ``cid`` is
+        the currently-active tab — non-active flips happen silently
+        (their own dashboard isn't visible anyway).
+        """
+        if cid != self.settings.active_client_id:
+            return
+        if on:
+            self._start_grace_countdown(3.0)
+        else:
+            self._stop_grace_countdown()
 
     # ───────── connection toggles ─────────
     def _toggle_arduino(self) -> None:

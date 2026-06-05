@@ -157,11 +157,21 @@ class FloatingSwitch(QWidget):
         )
         self._expand_btn.clicked.connect(self._toggle_panel)
 
+        # Tab number badge — small "1" / "2" label so the user can tell
+        # at a glance which floater belongs to which client tab.
+        self.tab_label = QLabel("")
+        self.tab_label.setStyleSheet(
+            "QLabel { color:#cfd6e2; font-size:11px; font-weight:700;"
+            " padding:0 2px; }"
+        )
+        self.tab_label.setVisible(False)   # hidden until set_tab_label called
+
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(6)
         top_row.addWidget(self.handle)
         top_row.addWidget(self.toggle)
+        top_row.addWidget(self.tab_label)
         top_row.addWidget(self._expand_btn)
         top_widget = QWidget(self)
         top_widget.setLayout(top_row)
@@ -226,6 +236,15 @@ class FloatingSwitch(QWidget):
         # Snapshot current use-state so the first auto-expand check
         # has something to compare to.
         self._prev_use = self._collect_use_state()
+
+    def set_tab_label(self, text: str) -> None:
+        """Set the small "1" / "2" tab indicator next to the toggle.
+        Pass empty string to hide. Called from main.py once per floater
+        with the client's 1-based tab index.
+        """
+        self.tab_label.setText(text or "")
+        self.tab_label.setVisible(bool(text))
+        self.adjustSize()
 
     def attach_to(self, hwnd: int) -> None:
         if not hwnd or not is_window_alive(hwnd):

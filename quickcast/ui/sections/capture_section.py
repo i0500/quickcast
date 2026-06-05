@@ -1170,6 +1170,21 @@ def _build_overlay_close_card() -> "QWidget":
             bus.settings_dirty.emit()
         tg.toggled.connect(_on_toggle)
 
+        # Two-way sync — dashboard sidebar (펫호루라기/아이템획득/혈맹축복
+        # 토글) writes _ov.enabled and emits settings_dirty. Without
+        # this _resync, this card's toggle stays stale until next tab swap.
+        def _resync_ov(_ov=ov, _tg=tg) -> None:
+            try:
+                cur = bool(_ov.enabled)
+                if _tg.is_on() != cur:
+                    _tg.set_state(cur, animate=True)
+            except RuntimeError:
+                try:
+                    bus.settings_dirty.disconnect(_resync_ov)
+                except Exception:
+                    pass
+        bus.settings_dirty.connect(_resync_ov)
+
         top.addWidget(tg)
         top.addWidget(name)
         if badge.text():

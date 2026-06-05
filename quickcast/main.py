@@ -552,9 +552,12 @@ def run() -> None:
     # read its expand panel data from settings.clients[cid] directly —
     # NOT the top-level active mirror — so two floaters never share the
     # same sub-toggle states.
-    for _cid, _prof in settings.clients.items():
+    for _idx, (_cid, _prof) in enumerate(settings.clients.items()):
         fl = FloatingSwitch(client_id=_cid)
         fl.attach_settings(settings)
+        # Small "1"/"2" badge next to the toggle so the user can identify
+        # which floater belongs to which tab at a glance.
+        fl.set_tab_label(str(_idx + 1))
         # Per-client toggle handler — does NOT touch master_switch.
         fl.toggled.connect(_make_floater_toggle_handler(_cid))
         # Initial visual state mirrors that client's enabled.

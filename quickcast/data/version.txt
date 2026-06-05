@@ -3,8 +3,8 @@
 # random %TEMP% MEI folder name.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 0, 0),
-    prodvers=(1, 1, 0, 0),
+    filevers=(1, 1, 1, 0),
+    prodvers=(1, 1, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -19,12 +19,12 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'S&J Devs'),
           StringStruct(u'FileDescription', u'QuickCast'),
-          StringStruct(u'FileVersion', u'1.1.0.0'),
+          StringStruct(u'FileVersion', u'1.1.1.0'),
           StringStruct(u'InternalName', u'quickcast'),
           StringStruct(u'LegalCopyright', u'\xa9 2026 S&J Devs'),
           StringStruct(u'OriginalFilename', u'quickcast.exe'),
           StringStruct(u'ProductName', u'QuickCast'),
-          StringStruct(u'ProductVersion', u'1.1.0.0'),
+          StringStruct(u'ProductVersion', u'1.1.1.0'),
         ]
       )
     ]),
