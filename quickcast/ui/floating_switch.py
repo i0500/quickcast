@@ -334,27 +334,32 @@ class FloatingSwitch(QWidget):
         self._track()
 
     def _client_profile(self):
-        """Return THIS floater's data source.
+        """Return THIS floater's live data source.
 
-        Per-tab mode (client_id set): always returns the live
-        ``settings.clients[client_id]`` ClientProfile. switch_client()
-        replaces that dict entry whole-object, so we re-resolve every
-        call — never cache.
+        Active client: returns ``self._settings`` (the mock top-level
+        mirror). UI writes from the dashboard / combat / capture pages
+        land here directly, so the floater panel sees them on the next
+        external-refresh tick without waiting for a tab swap to sync
+        mock ↔ clients dict.
 
-        Legacy single-tab mode (no client_id): falls back to the
-        top-level mock_settings mirror, preserving old behaviour for
-        single-instance deployments.
+        Standby client: returns ``settings.clients[client_id]`` — the
+        snapshot saved on the last active-tab swap.
+
+        Legacy (no client_id): top-level mirror.
         """
         s = self._settings
         if s is None:
             return None
-        if self._client_id:
-            try:
-                prof = s.clients.get(self._client_id)
-                if prof is not None:
-                    return prof
-            except Exception:
-                pass
+        if not self._client_id:
+            return s
+        try:
+            if self._client_id == getattr(s, "active_client_id", None):
+                return s    # mock = live writes from UI sections
+            prof = s.clients.get(self._client_id)
+            if prof is not None:
+                return prof
+        except Exception:
+            pass
         return s
 
     def _collect_use_state(self) -> dict[str, bool]:
@@ -376,17 +381,14 @@ class FloatingSwitch(QWidget):
         """Called from bus.slot_state_refresh / settings_dirty.
 
         Detects a True→False transition on any tracked item and
-        auto-opens the panel so the user notices. Always rebuilds the
-        panel's rows if it's currently open.
-
-        Self-broadcasts (the floater toggling a row writes back to
-        Settings and emits the same bus signals to keep the main UI
-        in sync) are filtered out via _suppress_emit so we don't
-        thrash through a full rebuild every time the user clicks a
-        sub-toggle.
+        auto-opens the panel so the user notices. ALWAYS rebuilds the
+        panel's rows if it's currently open — even when the change came
+        from our own sub-toggle click (the rebuild is cheap and the
+        IOSToggle.set_state used inside it doesn't re-emit, so no
+        recursion). The _suppress_emit latch only suppresses the
+        auto-open behaviour to avoid re-opening the panel as a
+        side-effect of the user's own click.
         """
-        if self._suppress_emit:
-            return
         cur = self._collect_use_state()
         auto_off = False
         for key, was in self._prev_use.items():
@@ -394,7 +396,7 @@ class FloatingSwitch(QWidget):
                 auto_off = True
                 break
         self._prev_use = cur
-        if auto_off:
+        if auto_off and not self._suppress_emit:
             self.set_panel_open(True)
         elif self._panel.isVisible():
             self._rebuild_panel()

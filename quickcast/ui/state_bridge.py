@@ -109,9 +109,15 @@ def wire_persistence(save_now) -> None:
         # next ON fires immediately instead of waiting for the previous
         # cooldown to expire. AppWindow._reset_slot_cooldown handles the
         # active controller's slot_manager.
+        # Also broadcast settings_dirty + slot_state_refresh so other
+        # mirrors (floater expand panel, combat card 사용 토글) update
+        # immediately — sidebar toggle alone only fires slot_toggled
+        # which the floater doesn't subscribe to.
         try:
             from quickcast.ui.design.signals import bus as _b
             _b.slot_cooldown_reset_request.emit(sid)
+            _b.settings_dirty.emit()
+            _b.slot_state_refresh.emit()
         except Exception:
             pass
 
