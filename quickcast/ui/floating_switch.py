@@ -542,8 +542,11 @@ class FloatingSwitch(QWidget):
     def _track(self) -> None:
         if self._target_hwnd is None:
             return
-        if self._dragging:
-            return
+        # NOTE: don't return early on _dragging here — the owner-restore
+        # block at the end of this method MUST run even while dragging,
+        # otherwise the mouse-down click that initiated the drag (which
+        # clears GWLP_HWNDPARENT in some Qt code paths) leaves the
+        # floater dangling and it visually disappears mid-drag.
         if not is_window_alive(self._target_hwnd):
             self._target_hwnd = None
             self.hide()
@@ -564,26 +567,27 @@ class FloatingSwitch(QWidget):
                 self.hide()
             return
 
-        rect = get_client_rect_screen(self._target_hwnd) or get_window_rect(self._target_hwnd)
-        if rect is None:
-            return
-        if self._user_offset is None:
-            # Default anchor — top-right corner, 8 px inset.
-            tx = rect.right - self.width() - 8
-            ty = rect.top + 8 + self.height()
-        else:
-            # Ratio-based — keeps the floater at the same relative spot
-            # inside the game window across resizes (e.g. fullscreen ↔
-            # windowed). Falls back to default if width/height is degenerate.
-            rx, ry = self._user_offset
-            w = max(1, rect.right - rect.left)
-            h = max(1, rect.bottom - rect.top)
-            tx = int(rect.left + rx * w)
-            ty = int(rect.top + ry * h)
-        if (self.x(), self.y()) != (tx, ty):
-            self.move(tx, ty)
-        if not self.isVisible():
-            self.show()
+        # Skip the auto-position calculation while the user is actively
+        # dragging — otherwise their movement gets fought by the tracker.
+        # The owner-restore block below still runs so the click that
+        # started the drag doesn't lose us behind the game.
+        if not self._dragging:
+            rect = (get_client_rect_screen(self._target_hwnd)
+                    or get_window_rect(self._target_hwnd))
+            if rect is not None:
+                if self._user_offset is None:
+                    tx = rect.right - self.width() - 8
+                    ty = rect.top + 8 + self.height()
+                else:
+                    rx, ry = self._user_offset
+                    w = max(1, rect.right - rect.left)
+                    h = max(1, rect.bottom - rect.top)
+                    tx = int(rect.left + rx * w)
+                    ty = int(rect.top + ry * h)
+                if (self.x(), self.y()) != (tx, ty):
+                    self.move(tx, ty)
+            if not self.isVisible():
+                self.show()
 
         # Z-order coupling — owner pattern set in attach_to(). Qt's
         # show/hide and various platform events occasionally CLEAR the
@@ -620,6 +624,30 @@ class FloatingSwitch(QWidget):
     def _on_drag_start(self, _global_pos: QPoint) -> None:
         self._drag_origin = self.pos()
         self._dragging = True
+        # Reassert owner immediately — the mouse-down click that started
+        # the drag occasionally clears GWLP_HWNDPARENT, and waiting for
+        # the next _track tick (~200 ms) makes the floater visually
+        # vanish behind the game during the drag's first frames.
+        try:
+            self._restore_owner_now()
+        except Exception:
+            pass
+
+    def _restore_owner_now(self) -> None:
+        if self._target_hwnd is None:
+            return
+        import ctypes
+        from ctypes import wintypes, c_int, c_void_p
+        user32 = ctypes.windll.user32
+        is_64 = (ctypes.sizeof(c_void_p) == 8)
+        set_fn = (user32.SetWindowLongPtrW if is_64
+                  else user32.SetWindowLongW)
+        set_fn.argtypes = [wintypes.HWND, c_int, c_void_p]
+        set_fn.restype = c_void_p
+        GWLP_HWNDPARENT = -8
+        fl_hwnd = int(self.winId())
+        if fl_hwnd:
+            set_fn(fl_hwnd, GWLP_HWNDPARENT, int(self._target_hwnd))
 
     def _on_drag_move(self, global_pos: QPoint) -> None:
         new_x = global_pos.x() - self.handle.x() - self.handle.width() // 2
