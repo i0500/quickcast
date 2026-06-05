@@ -237,7 +237,14 @@ class MacroController:
                     self._latest_frame = frame
                     self._latest_analysis = analysis
                 self.state.update_analysis(analysis)
-                if self.on_analysis:
+                # on_analysis marshals the frame + analysis to the UI
+                # thread (dashboard preview, status bar). ONLY the active
+                # tab is visible, so a standby controller doing this every
+                # frame just burns a queued-signal + numpy hand-off for a
+                # widget nobody is looking at. Gate on is_active_tab — the
+                # macro itself reads _latest_analysis directly and doesn't
+                # need the callback at all.
+                if self.on_analysis and self.is_active_tab:
                     try:
                         self.on_analysis(analysis, frame)
                     except Exception as e:
@@ -388,25 +395,21 @@ class MacroController:
         prev = (p.pk.use, p.potion.use,
                 {sid: sl.use for sid, sl in p.slots.items()})
 
-        # Fire any matching slot events first.
-        # Multi-slot bursts (e.g. slot1 count=4 + slot2 count=2 firing the
-        # same tick) used to run serially — slot1's full burst blocked
-        # slot2's start. Dispatch each event on its own thread so they
-        # overlap. Backend send_key methods are protected by per-instance
-        # locks (PostMessage / AttachInput / Arduino), so concurrent
-        # callers serialise on the actual hardware/IPC boundary only —
-        # not on the inter-key sleep in _send_burst_via, which keeps
-        # bursts visually interleaved.
+        # Fire any matching slot events — SEQUENTIALLY on the control
+        # thread. The earlier thread-per-fire experiment made input
+        # SLOWER and dropped keys: every slot targets the same game
+        # window → same backend → same per-instance lock, so the
+        # "parallel" threads just serialised on that lock anyway, while
+        # adding thread-spawn churn (one per slot per 100 ms tick) and
+        # GIL contention with the two capture/recognition loops. Serial
+        # dispatch on a single thread is both faster and reliable: no
+        # lock waits, no spawn overhead. Telegram I/O (the only slow
+        # part) is offloaded inside _fire so it doesn't block the loop.
         events = self.slot_manager.evaluate(self.settings, analysis, p)
         fired_ids: list[str] = []
         for event in events:
             fired_ids.append(event.slot_id)
-            threading.Thread(
-                target=self._fire,
-                args=(event, frame),
-                name=f"Fire-{self.client_id}-{event.slot_id}",
-                daemon=True,
-            ).start()
+            self._fire(event, frame)
 
         if events:
             # Compare snapshot to detect any toggle that flipped True→False.
@@ -785,16 +788,27 @@ class MacroController:
         if event.tele_use and self.telegram and self.telegram.connected:
             # Multi-client: prefix the tab label so two clients sharing
             # one Telegram bot don't blur together in chat history.
-            # Single-client deployments see just the event label (empty
-            # prefix when the tab label is the default "클라1" / blank).
             tab_label = (getattr(self.profile, "label", "") or "").strip()
             prefix = f"[{tab_label}] " if tab_label else ""
-            if event.snapshot and frame is not None:
-                self.telegram.send_photo(
-                    frame.image, caption=f"{prefix}{event.label} 실행",
-                )
-            else:
-                self.telegram.send_text(f"{prefix}{event.label} 기능을 사용했습니다")
+            # Offload Telegram I/O to a daemon thread — a photo upload is
+            # a network round-trip (100s of ms) and MUST NOT block the
+            # control loop's serial slot dispatch, or the next slot's
+            # keypress would stall behind it. Snapshot the frame image
+            # reference now; send_photo reads it on the worker thread.
+            img = frame.image if (event.snapshot and frame is not None) else None
+            label = event.label
+            def _notify(_img=img, _label=label, _prefix=prefix) -> None:
+                try:
+                    if _img is not None:
+                        self.telegram.send_photo(
+                            _img, caption=f"{_prefix}{_label} 실행")
+                    else:
+                        self.telegram.send_text(
+                            f"{_prefix}{_label} 기능을 사용했습니다")
+                except Exception:
+                    logger.exception("telegram notify failed")
+            threading.Thread(target=_notify, name="TeleNotify",
+                              daemon=True).start()
 
     def _send_burst(self, key: str, count: int, delay: float) -> None:
         self._send_burst_via(self.input, key, count, delay)
