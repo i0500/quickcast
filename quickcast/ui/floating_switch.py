@@ -567,23 +567,52 @@ class FloatingSwitch(QWidget):
         if not self.isVisible():
             self.show()
 
-        # Z-order coupling — pin the floater right above the game window.
-        # If another app comes between (e.g. user clicks a browser), the
-        # browser sits above the game AND above this floater, so the
-        # floater visually goes "behind" too. The moment the user clicks
-        # the game back to top, both rise together. This replaces the
-        # previous WindowStaysOnTopHint behaviour where the floater
-        # stayed above everything regardless of game z-order.
+        # Z-order coupling — pin the floater right ABOVE the game window
+        # so when the game rises both rise together, and when something
+        # gets above the game both go behind. Win32 SetWindowPos's
+        # hWndInsertAfter inserts the positioned window AFTER (below)
+        # that hwnd in z-order, so we need the window currently ABOVE
+        # target_hwnd and insert ourselves there — that lands us
+        # immediately above the game. When the game IS already at top,
+        # GW_HWNDPREV returns NULL, so we use HWND_TOP.
+        #
+        # NB: ctypes argtypes/restype MUST be set explicitly for HWND
+        # arguments — defaulting to c_int truncates 64-bit window handles
+        # on x64 Windows, which made this code work in dev (small handle
+        # values) but silently fail in the PyInstaller build (larger
+        # handles → truncated → SetWindowPos receives garbage → floater
+        # ends up behind the game).
         try:
+            from ctypes import wintypes, c_int, c_uint
+            user32.GetWindow.argtypes = [wintypes.HWND, c_uint]
+            user32.GetWindow.restype = wintypes.HWND
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND, wintypes.HWND,
+                c_int, c_int, c_int, c_int, c_uint,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
             SWP_NOACTIVATE = 0x0010
+            GW_HWNDPREV = 3
             fl_hwnd = int(self.winId())
-            user32.SetWindowPos(
-                fl_hwnd, int(self._target_hwnd),
-                0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
+            if not fl_hwnd:
+                return    # widget not yet native — retry next tick
+            tgt_hwnd = int(self._target_hwnd)
+            prev_above = user32.GetWindow(tgt_hwnd, GW_HWNDPREV) or 0
+            # If GetWindow returned the floater itself (we're already
+            # positioned right above target), no work to do.
+            if prev_above == fl_hwnd:
+                pass
+            else:
+                # hWndInsertAfter=NULL (0) puts the window at the top of
+                # the z-order, which is exactly what we want when the
+                # game is currently topmost (prev_above == 0).
+                user32.SetWindowPos(
+                    fl_hwnd, prev_above,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
         except Exception:
             pass
 
