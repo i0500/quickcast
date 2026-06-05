@@ -585,8 +585,36 @@ class FloatingSwitch(QWidget):
         if not self.isVisible():
             self.show()
 
-        # Z-order coupling is handled by the Win32 owner relationship
-        # set up in attach_to() — no per-tick SetWindowPos needed.
+        # Z-order coupling — owner pattern set in attach_to(). Qt's
+        # show/hide and various platform events occasionally CLEAR the
+        # GWLP_HWNDPARENT we wrote, dropping the floater back into the
+        # global z-order (so it ends up behind the game on the next
+        # focus change). Re-establish the owner relationship every tick
+        # IF (and only if) it diverged — same lookup → 1 SetWindowLong
+        # only when needed. No paint storm: SetWindowLongPtr never
+        # triggers a repaint by itself, unlike SetWindowPos.
+        try:
+            import ctypes
+            from ctypes import wintypes, c_int, c_void_p
+            user32 = ctypes.windll.user32
+            is_64 = (ctypes.sizeof(c_void_p) == 8)
+            get_fn = (user32.GetWindowLongPtrW if is_64
+                      else user32.GetWindowLongW)
+            set_fn = (user32.SetWindowLongPtrW if is_64
+                      else user32.SetWindowLongW)
+            get_fn.argtypes = [wintypes.HWND, c_int]
+            get_fn.restype = c_void_p
+            set_fn.argtypes = [wintypes.HWND, c_int, c_void_p]
+            set_fn.restype = c_void_p
+            GWLP_HWNDPARENT = -8
+            fl_hwnd = int(self.winId())
+            tgt_hwnd = int(self._target_hwnd)
+            if fl_hwnd and tgt_hwnd:
+                current = get_fn(fl_hwnd, GWLP_HWNDPARENT) or 0
+                if int(current) != tgt_hwnd:
+                    set_fn(fl_hwnd, GWLP_HWNDPARENT, tgt_hwnd)
+        except Exception:
+            pass
 
     # ───────── drag handlers ─────────
     def _on_drag_start(self, _global_pos: QPoint) -> None:
