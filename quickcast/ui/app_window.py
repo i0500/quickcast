@@ -1356,6 +1356,7 @@ class AppWindow(AppShell):
         back can find it), and re-wires the UI callbacks.
         """
         from quickcast.core.controller import MacroController
+        from quickcast.core.recognition import Recognizer
         from quickcast.slots.slot_manager import SlotManager
         from quickcast.input_io.win32_input import (
             AttachInputBackend, PostMessageBackend,
@@ -1386,7 +1387,10 @@ class AppWindow(AppShell):
         new_ctrl = MacroController(
             settings=self.settings,
             capture=capture,
-            recognizer=old_ctrl.recognizer,   # shared (template targets are global)
+            # Each controller gets its own Recognizer — instance state
+            # (_buff_history, _buff_smoothed, score-log throttles) must
+            # not be shared across clients or buff counts cross-pollinate.
+            recognizer=Recognizer(),
             slot_manager=new_sm,
             input_backend=pick,
             telegram=old_ctrl.telegram,

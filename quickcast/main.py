@@ -427,10 +427,17 @@ def run() -> None:
                 sb_pick_input = sb_attach
             elif profile.input_backend == "arduino":
                 sb_pick_input = arduino
+            # Recognizer holds per-frame state (_buff_history /
+            # _buff_smoothed / score-log throttles) — sharing one across
+            # both clients caused cross-tab leak (one tab's buff count
+            # polluting the other's smoothing). Each controller gets its
+            # own. Template targets are loaded from disk → cheap and
+            # identical across instances; no global cache needed.
+            sb_recognizer = Recognizer()
             sb_controller = MacroController(
                 settings=settings,
                 capture=sb_cap,
-                recognizer=recognizer,
+                recognizer=sb_recognizer,
                 slot_manager=sb_sm,
                 input_backend=sb_pick_input,
                 telegram=telegram,

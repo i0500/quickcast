@@ -375,11 +375,24 @@ class MacroController:
                 {sid: sl.use for sid, sl in p.slots.items()})
 
         # Fire any matching slot events first.
+        # Multi-slot bursts (e.g. slot1 count=4 + slot2 count=2 firing the
+        # same tick) used to run serially — slot1's full burst blocked
+        # slot2's start. Dispatch each event on its own thread so they
+        # overlap. Backend send_key methods are protected by per-instance
+        # locks (PostMessage / AttachInput / Arduino), so concurrent
+        # callers serialise on the actual hardware/IPC boundary only —
+        # not on the inter-key sleep in _send_burst_via, which keeps
+        # bursts visually interleaved.
         events = self.slot_manager.evaluate(self.settings, analysis, p)
         fired_ids: list[str] = []
         for event in events:
-            self._fire(event, frame)
             fired_ids.append(event.slot_id)
+            threading.Thread(
+                target=self._fire,
+                args=(event, frame),
+                name=f"Fire-{self.client_id}-{event.slot_id}",
+                daemon=True,
+            ).start()
 
         if events:
             # Compare snapshot to detect any toggle that flipped True→False.

@@ -132,7 +132,15 @@ class FloatingSwitch(QWidget):
         self._client_id: str = client_id or ""
 
         self._target_hwnd: Optional[int] = None
-        self._user_offset: Optional[QPoint] = None
+        # User-pinned floater position, expressed as a fraction of the
+        # target window's client rect so a window resize keeps the
+        # floater in the same relative spot (e.g. always 90 % across
+        # from the left edge instead of 8 pixels from the right —
+        # which drifts the moment the user resizes the game window).
+        #
+        # ``(ratio_x, ratio_y)`` = (top-left x / width, top-left y / height).
+        # None ⇒ default top-right anchor (8 px in from the right edge).
+        self._user_offset: Optional[tuple[float, float]] = None
         self._drag_origin: Optional[QPoint] = None
         self._dragging: bool = False
 
@@ -289,9 +297,11 @@ class FloatingSwitch(QWidget):
             rect = (get_client_rect_screen(self._target_hwnd)
                     or get_window_rect(self._target_hwnd))
             if rect is not None:
-                self._user_offset = QPoint(
-                    rect.right - self.x() - self.width(),
-                    self.y() - rect.top,
+                w = max(1, rect.right - rect.left)
+                h = max(1, rect.bottom - rect.top)
+                self._user_offset = (
+                    (self.x() - rect.left) / float(w),
+                    (self.y() - rect.top) / float(h),
                 )
         self._track()
 
@@ -518,11 +528,18 @@ class FloatingSwitch(QWidget):
         if rect is None:
             return
         if self._user_offset is None:
+            # Default anchor — top-right corner, 8 px inset.
             tx = rect.right - self.width() - 8
             ty = rect.top + 8 + self.height()
         else:
-            tx = rect.right - self.width() - self._user_offset.x()
-            ty = rect.top + self._user_offset.y()
+            # Ratio-based — keeps the floater at the same relative spot
+            # inside the game window across resizes (e.g. fullscreen ↔
+            # windowed). Falls back to default if width/height is degenerate.
+            rx, ry = self._user_offset
+            w = max(1, rect.right - rect.left)
+            h = max(1, rect.bottom - rect.top)
+            tx = int(rect.left + rx * w)
+            ty = int(rect.top + ry * h)
         if (self.x(), self.y()) != (tx, ty):
             self.move(tx, ty)
 
@@ -543,9 +560,14 @@ class FloatingSwitch(QWidget):
         rect = get_client_rect_screen(self._target_hwnd) or get_window_rect(self._target_hwnd)
         if rect is None:
             return
-        self._user_offset = QPoint(
-            rect.right - self.x() - self.width(),
-            self.y() - rect.top,
+        # Save as fraction of the client rect so a resize keeps the
+        # floater in the same relative spot. Top-left corner is the
+        # anchor point (mirrors how _track positions it).
+        w = max(1, rect.right - rect.left)
+        h = max(1, rect.bottom - rect.top)
+        self._user_offset = (
+            (self.x() - rect.left) / float(w),
+            (self.y() - rect.top) / float(h),
         )
 
     # ───────── paint ─────────
