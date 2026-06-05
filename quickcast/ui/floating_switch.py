@@ -250,6 +250,24 @@ class FloatingSwitch(QWidget):
         self._tracker.start()
         self._track()
         self.show()
+        # Win32 owner relationship — once set, Windows automatically
+        # keeps the owned floater above its owner in z-order, hides it
+        # when the owner is minimised, and lifts it together when the
+        # owner is raised. Replaces the per-tick SetWindowPos pattern
+        # that flickered in the PyInstaller build.
+        try:
+            import ctypes
+            from ctypes import wintypes, c_int, c_void_p
+            user32 = ctypes.windll.user32
+            fn = (user32.SetWindowLongPtrW
+                  if ctypes.sizeof(c_void_p) == 8
+                  else user32.SetWindowLongW)
+            fn.argtypes = [wintypes.HWND, c_int, c_void_p]
+            fn.restype = c_void_p
+            GWLP_HWNDPARENT = -8
+            fn(int(self.winId()), GWLP_HWNDPARENT, int(hwnd))
+        except Exception:
+            pass
 
     def detach(self) -> None:
         self._target_hwnd = None
@@ -567,59 +585,8 @@ class FloatingSwitch(QWidget):
         if not self.isVisible():
             self.show()
 
-        # Z-order coupling — pin the floater right ABOVE the game window
-        # so when the game rises both rise together, and when something
-        # gets above the game both go behind. Win32 SetWindowPos's
-        # hWndInsertAfter inserts the positioned window AFTER (below)
-        # that hwnd in z-order, so we need the window currently ABOVE
-        # target_hwnd and insert ourselves there — that lands us
-        # immediately above the game. When the game IS already at top,
-        # GW_HWNDPREV returns NULL, so we use HWND_TOP.
-        #
-        # NB: ctypes argtypes/restype MUST be set explicitly for HWND
-        # arguments — defaulting to c_int truncates 64-bit window handles
-        # on x64 Windows, which made this code work in dev (small handle
-        # values) but silently fail in the PyInstaller build (larger
-        # handles → truncated → SetWindowPos receives garbage → floater
-        # ends up behind the game).
-        try:
-            from ctypes import wintypes, c_int, c_uint
-            user32.GetWindow.argtypes = [wintypes.HWND, c_uint]
-            user32.GetWindow.restype = wintypes.HWND
-            user32.SetWindowPos.argtypes = [
-                wintypes.HWND, wintypes.HWND,
-                c_int, c_int, c_int, c_int, c_uint,
-            ]
-            user32.SetWindowPos.restype = wintypes.BOOL
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
-            SWP_NOACTIVATE = 0x0010
-            SWP_NOREDRAW = 0x0008
-            SWP_NOSENDCHANGING = 0x0400
-            GW_HWNDPREV = 3
-            fl_hwnd = int(self.winId())
-            if not fl_hwnd:
-                return    # widget not yet native — retry next tick
-            tgt_hwnd = int(self._target_hwnd)
-            prev_above_target = user32.GetWindow(tgt_hwnd, GW_HWNDPREV) or 0
-            # Skip the SetWindowPos call entirely when we're already
-            # positioned correctly. The flicker came from issuing a
-            # z-order update every 200 ms even when nothing changed —
-            # each call triggers Windows' compositor repaint cycle.
-            if prev_above_target == fl_hwnd:
-                pass    # already directly above game window
-            else:
-                # NOREDRAW + NOSENDCHANGING suppresses both the immediate
-                # repaint and the WM_WINDOWPOSCHANGING notification, so
-                # the actual z-order shift happens without a paint storm.
-                user32.SetWindowPos(
-                    fl_hwnd, prev_above_target,
-                    0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-                    | SWP_NOREDRAW | SWP_NOSENDCHANGING,
-                )
-        except Exception:
-            pass
+        # Z-order coupling is handled by the Win32 owner relationship
+        # set up in attach_to() — no per-tick SetWindowPos needed.
 
     # ───────── drag handlers ─────────
     def _on_drag_start(self, _global_pos: QPoint) -> None:
