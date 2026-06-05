@@ -201,6 +201,21 @@ def make_recovery_card() -> QWidget:
         if rec.enabled != on:
             rec.enabled = on; bus.settings_dirty.emit()
     enable_sw.toggled.connect(_on_enable)
+    # Two-way sync with the dashboard sidebar "사냥 복귀" quick toggle
+    # (and anything else that writes rec.enabled then emits settings_dirty).
+    # Without this the recovery card's "사용" toggle visual stays frozen
+    # on whatever value it was loaded with even after an external flip.
+    def _resync_enable() -> None:
+        try:
+            cur = bool(rec.enabled)
+            if enable_sw.is_on() != cur:
+                enable_sw.set_state(cur, animate=True)
+        except RuntimeError:
+            try:
+                bus.settings_dirty.disconnect(_resync_enable)
+            except Exception:
+                pass
+    bus.settings_dirty.connect(_resync_enable)
     enable_row.addWidget(enable_lbl); enable_row.addWidget(enable_sw); enable_row.addSpacing(20)
     trig_lbl = QLabel("트리거"); reactive(trig_lbl, lambda: f"color:{T.palette.text_secondary};")
     enable_row.addWidget(trig_lbl)

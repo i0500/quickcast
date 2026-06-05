@@ -287,12 +287,16 @@ def _bind_ios(target_obj, attr: str, label: str) -> QHBoxLayout:
             if sw.is_on() != cur:
                 sw.set_state(cur, animate=True)
         except RuntimeError:
-            # "Internal C++ object already deleted" — drop the connection.
             try:
                 bus.slot_state_refresh.disconnect(_resync)
+                bus.settings_dirty.disconnect(_resync)
             except Exception:
                 pass
     bus.slot_state_refresh.connect(_resync)
+    # Also listen to settings_dirty — dashboard sidebar's quick toggles
+    # emit settings_dirty (no slot_state_refresh) when flipping the same
+    # field, so without this the combat card visual stays stale.
+    bus.settings_dirty.connect(_resync)
 
     row.addWidget(lbl); row.addWidget(sw)
     return row
