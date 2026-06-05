@@ -667,6 +667,23 @@ def run() -> None:
                     pass
     bus.settings_dirty.connect(_resync_floaters_from_profiles)
 
+    # Visual emphasis — dim non-active floaters so the user can tell at
+    # a glance which floater belongs to the currently-displayed tab.
+    # z-order isn't changed (both stay topmost above other apps); only
+    # window opacity differs.
+    def _apply_active_floater_visual(active_cid: str) -> None:
+        for _cid, _fl in floaters.items():
+            try:
+                _fl.set_active(_cid == active_cid)
+            except Exception:
+                pass
+
+    _apply_active_floater_visual(settings.active_client_id)
+
+    def _on_client_changed_for_floaters(cid: str) -> None:
+        _apply_active_floater_visual(cid)
+    bus.client_changed.connect(_on_client_changed_for_floaters)
+
     # Cross-mirror titlebar Master ↔ per-client floater states.
     # When the titlebar (or shortcut) flips the active client's enabled,
     # this updates the matching floater. When a floater flips a client's

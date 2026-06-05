@@ -131,6 +131,12 @@ class FloatingSwitch(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
 
+        # Whether this floater belongs to the currently-active client
+        # tab. Visually dimmed when False (윈도우 opacity) so the user
+        # can tell at a glance which floater is the "주 작업 대상". Set
+        # via set_active() — AppWindow/main.py drives it on tab swap.
+        self._is_active_client: bool = True
+
         # Multi-client: which tab this floater belongs to. Empty = legacy
         # single-client (reads from the top-level mock_settings mirror).
         # When set, _client_profile() returns settings.clients[client_id]
@@ -260,6 +266,21 @@ class FloatingSwitch(QWidget):
     def set_state(self, on: bool) -> None:
         self.toggle.set_state(on)
         self.handle.set_state(on)
+
+    def set_active(self, active: bool) -> None:
+        """Visual highlight for the active client's floater.
+
+        - active=True : full opacity (1.0), normal accent.
+        - active=False: dimmed (opacity 0.55) so the user sees at a
+          glance which floater belongs to the tab currently displayed
+          in QuickCast's main window.
+        z-order is NOT changed (both floaters stay topmost). Only the
+        visual emphasis differs.
+        """
+        if self._is_active_client == active:
+            return
+        self._is_active_client = active
+        self.setWindowOpacity(1.0 if active else 0.55)
 
     def set_theme(self, _theme_id: str) -> None:
         pass
