@@ -131,12 +131,6 @@ class FloatingSwitch(QWidget):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
 
-        # Whether this floater belongs to the currently-active client
-        # tab. Visually dimmed when False (윈도우 opacity) so the user
-        # can tell at a glance which floater is the "주 작업 대상". Set
-        # via set_active() — AppWindow/main.py drives it on tab swap.
-        self._is_active_client: bool = True
-
         # Multi-client: which tab this floater belongs to. Empty = legacy
         # single-client (reads from the top-level mock_settings mirror).
         # When set, _client_profile() returns settings.clients[client_id]
@@ -267,20 +261,31 @@ class FloatingSwitch(QWidget):
         self.toggle.set_state(on)
         self.handle.set_state(on)
 
-    def set_active(self, active: bool) -> None:
-        """Visual highlight for the active client's floater.
+    # Opacity levels for the foreground-based highlight.
+    _OPACITY_FOREGROUND = 1.0     # 이 게임창이 현재 포그라운드일 때
+    _OPACITY_DIMMED = 0.40        # 다른 창이 포그라운드일 때 (둘 다 흐림)
 
-        - active=True : full opacity (1.0), normal accent.
-        - active=False: dimmed (opacity 0.55) so the user sees at a
-          glance which floater belongs to the tab currently displayed
-          in QuickCast's main window.
-        z-order is NOT changed (both floaters stay topmost). Only the
-        visual emphasis differs.
+    def _apply_foreground_opacity(self) -> None:
+        """Set opacity based on whether THIS floater's game window is the
+        current foreground window. Driven from _track (200 ms poll).
+
+        탭 선택과 무관 — 실제로 사용자가 그 게임창을 보고 있을 때만
+        진해지고, 다른 창(다른 게임/브라우저/QuickCast 본체)으로 가면
+        둘 다 흐려진다.
         """
-        if self._is_active_client == active:
+        if self._target_hwnd is None:
             return
-        self._is_active_client = active
-        self.setWindowOpacity(1.0 if active else 0.55)
+        try:
+            import ctypes
+            fg = int(ctypes.windll.user32.GetForegroundWindow())
+        except Exception:
+            fg = 0
+        is_fg = (fg == int(self._target_hwnd))
+        target = self._OPACITY_FOREGROUND if is_fg else self._OPACITY_DIMMED
+        # windowOpacity is a float; compare with tolerance to avoid
+        # redundant native calls every tick.
+        if abs(self.windowOpacity() - target) > 0.01:
+            self.setWindowOpacity(target)
 
     def set_theme(self, _theme_id: str) -> None:
         pass
@@ -597,6 +602,11 @@ class FloatingSwitch(QWidget):
 
         # Z-order: WindowStaysOnTopHint handles "always above the game"
         # automatically. No per-tick SetWindowPos / SetWindowLongPtr.
+
+        # Foreground-based dim/highlight — this floater is solid only when
+        # its own game window is the active foreground window; otherwise
+        # dimmed. Independent of which QuickCast tab is selected.
+        self._apply_foreground_opacity()
 
     # ───────── drag handlers ─────────
     def _on_drag_start(self, _global_pos: QPoint) -> None:

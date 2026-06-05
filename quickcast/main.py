@@ -667,22 +667,9 @@ def run() -> None:
                     pass
     bus.settings_dirty.connect(_resync_floaters_from_profiles)
 
-    # Visual emphasis — dim non-active floaters so the user can tell at
-    # a glance which floater belongs to the currently-displayed tab.
-    # z-order isn't changed (both stay topmost above other apps); only
-    # window opacity differs.
-    def _apply_active_floater_visual(active_cid: str) -> None:
-        for _cid, _fl in floaters.items():
-            try:
-                _fl.set_active(_cid == active_cid)
-            except Exception:
-                pass
-
-    _apply_active_floater_visual(settings.active_client_id)
-
-    def _on_client_changed_for_floaters(cid: str) -> None:
-        _apply_active_floater_visual(cid)
-    bus.client_changed.connect(_on_client_changed_for_floaters)
+    # Floater dim/highlight is now driven inside FloatingSwitch._track
+    # based on the actual foreground game window (not the selected tab),
+    # so no main.py wiring is needed for that visual.
 
     # Cross-mirror titlebar Master ↔ per-client floater states.
     # When the titlebar (or shortcut) flips the active client's enabled,
