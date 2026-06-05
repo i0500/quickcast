@@ -67,7 +67,13 @@ def _make_reset_button() -> QPushButton:
 
 def _bind_axis(label: str, get_v: Callable[[], int], set_v: Callable[[int], None],
                 hi: int) -> QWidget:
-    """Single label+stepper bound to a getter/setter pair."""
+    """Single label+stepper bound to a getter/setter pair.
+
+    Reactive: bus.settings_dirty / bus.client_changed re-pull the getter
+    value into the stepper so a tab swap or external edit (e.g. ROI
+    drag in the preview, reset button) updates the displayed coord
+    without needing per-call-site wiring.
+    """
     ax = QLabel(label)
     reactive(ax, lambda: f"color:{T.palette.text_tertiary}; font-family:{T.type.mono};")
     s = Stepper(get_v(), 0, hi, 1, 0, "", width=110)
@@ -78,6 +84,22 @@ def _bind_axis(label: str, get_v: Callable[[], int], set_v: Callable[[int], None
             set_v(new)
             bus.settings_dirty.emit()
     s.valueChanged.connect(_on)
+
+    def _resync() -> None:
+        try:
+            cur = int(get_v())
+            if int(s.value()) != cur:
+                s.setValue(cur)
+        except RuntimeError:
+            try:
+                bus.settings_dirty.disconnect(_resync)
+                bus.client_changed.disconnect(_resync_via_cid)
+            except Exception:
+                pass
+    def _resync_via_cid(_cid: str) -> None:
+        _resync()
+    bus.settings_dirty.connect(_resync)
+    bus.client_changed.connect(_resync_via_cid)
 
     sub = QHBoxLayout(); sub.setContentsMargins(0, 0, 0, 0); sub.setSpacing(4)
     sub.addWidget(ax); sub.addWidget(s)
@@ -238,6 +260,9 @@ def make_capture() -> tuple[QWidget, QWidget]:
     _refresh_sidebar()
     bus.capture_target_changed.connect(_refresh_sidebar)
     bus.theme_changed.connect(_refresh_sidebar)
+    # Multi-client: tab swap 시 active 클라의 capture_window_title이
+    # mock_settings에 미러되므로 사이드바도 새 클라 게임창 이름으로 갱신.
+    bus.client_changed.connect(lambda _cid: _refresh_sidebar())
 
     sv.addStretch(1)
 
@@ -836,6 +861,25 @@ def _build_buff_ocr_card(state: dict, parent: "QWidget") -> "QWidget":
     thr_in.valueChanged.connect(_on_thr)
     actions.addWidget(thr_in)
     actions.addStretch(1)
+
+    # Multi-client: tab swap 시 mock_settings.recovery 객체의 in-place
+    # mutate된 새 클라 값을 Stepper visual에도 반영. settings_dirty +
+    # client_changed 둘 다 구독 — 어느 한쪽에서 emit돼도 갱신.
+    def _resync_thr() -> None:
+        try:
+            cur = int(mock_settings.recovery.town_idle_threshold)
+            if int(thr_in.value()) != cur:
+                thr_in.setValue(cur)
+        except RuntimeError:
+            try:
+                bus.settings_dirty.disconnect(_resync_thr)
+                bus.client_changed.disconnect(_resync_thr_via_cid)
+            except Exception:
+                pass
+    def _resync_thr_via_cid(_cid: str) -> None:
+        _resync_thr()
+    bus.settings_dirty.connect(_resync_thr)
+    bus.client_changed.connect(_resync_thr_via_cid)
 
     learn_btn = IconButton("학습 (0~9)", "settings", variant="primary", size="sm")
     learn_btn.setToolTip("현재 캡처 프레임에서 버프 ROI를 잘라 OCR 글자 학습 다이얼로그 실행")

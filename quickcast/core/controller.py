@@ -211,6 +211,20 @@ class MacroController:
         # spam the log with one identical line per tick.
         last_err_key = ""
         while not self._stop.is_set():
+            # Idle gate — when this client's macro is disabled AND its
+            # tab isn't currently visible, there's nothing consuming the
+            # frames so skip capture+recognition entirely. The active
+            # tab keeps capturing so the dashboard preview stays live;
+            # disabled-but-still-active also keeps capturing because the
+            # user might be calibrating ROIs.
+            if (not getattr(self.profile, "enabled", True)
+                    and not self.is_active_tab):
+                # Sleep 500 ms — long enough to keep CPU near 0 on the
+                # standby tab, short enough that flipping it ON via the
+                # floater feels responsive (≤ ~1 grace cycle delay).
+                self._stop.wait(0.5)
+                next_tick = time.monotonic()
+                continue
             try:
                 frame = self.capture.grab()
                 # Aspect-ratio profile sync — keeps HP/MP/PK/POTION coords
