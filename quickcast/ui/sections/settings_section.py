@@ -208,6 +208,32 @@ def _panel_connection() -> QWidget:
     )
     conn.add(_form_row("OCR 인식 주기", ocr_int))
 
+    # 오버레이 자동닫기 인식 주기 — 펫호루라기/아이템/혈맹 팝업 template
+    # matching 주기. 팝업은 수 초 유지되니 0.3~0.5초면 충분, CPU 절약.
+    _OV_INTERVALS = [("매 프레임", 0.0), ("0.2초", 0.2), ("0.4초", 0.4),
+                      ("0.7초", 0.7), ("1초", 1.0), ("2초", 2.0)]
+    ov_int = QComboBox()
+    for lbl, _v in _OV_INTERVALS:
+        ov_int.addItem(lbl)
+    cur_ov = float(getattr(mock_settings, "overlay_scan_interval", 0.4) or 0.0)
+    _ov_idx = min(range(len(_OV_INTERVALS)),
+                  key=lambda i: abs(_OV_INTERVALS[i][1] - cur_ov))
+    ov_int.setCurrentIndex(_ov_idx)
+    def _on_ov_int(idx: int) -> None:
+        if idx < 0 or idx >= len(_OV_INTERVALS):
+            return
+        new = _OV_INTERVALS[idx][1]
+        if abs(float(getattr(mock_settings, "overlay_scan_interval", 0.4) or 0.0) - new) > 1e-6:
+            mock_settings.overlay_scan_interval = new
+            bus.settings_dirty.emit()
+    ov_int.currentIndexChanged.connect(_on_ov_int)
+    ov_int.setToolTip(
+        "오버레이 자동닫기(펫호루라기·아이템획득·혈맹축복) 인식 주기.\n"
+        "팝업은 한번 뜨면 수 초 유지되니 0.4초 간격으로도 충분히 빨리\n"
+        "닫고 CPU를 아낍니다. '매 프레임'은 가장 빠르지만 무거움. 기본 0.4초."
+    )
+    conn.add(_form_row("오버레이 인식 주기", ov_int))
+
     v.addWidget(conn); v.addStretch(1)
     return w
 

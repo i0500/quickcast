@@ -458,6 +458,13 @@ class Recognizer:
         # buff_* ) tuple so analyze() can short-circuit cheaply.
         self._ocr_last_at: float = 0.0
         self._ocr_cache: Optional[dict] = None
+        # Overlay-match throttle — same idea as the OCR throttle. The
+        # pet-whistle / item-acquired / blood-pledge popups stay on
+        # screen for seconds, so matching them every frame is wasteful.
+        # Run at most once per ``settings.overlay_scan_interval`` and
+        # reuse the cached OverlayMatch dict in between.
+        self._overlay_last_at: float = 0.0
+        self._overlay_cache: dict = {}
         # Window of frames considered for the vote. At ~10 fps this
         # is ~1 second of jitter rejection without lagging real changes.
         self._buff_window: int = 10
@@ -899,36 +906,54 @@ class Recognizer:
         # scan its search region for the template. Match magnitude
         # mirrors PK (scale_legacy=5_000_000) so thresholds are
         # interchangeable mentally.
-        overlay_matches: dict[str, OverlayMatch] = {}
+        #
+        # Throttled: the popups stay on screen for seconds, so matching
+        # 3 templates every frame is wasteful. Run at most once per
+        # ``settings.overlay_scan_interval`` and reuse the cached match
+        # dict on the frames in between. The controller's sustain /
+        # cooldown logic is monotonic-time based, so the ESC still fires
+        # on time even though detection is sampled at a coarser rate.
         overlay_cfg = getattr(settings, "overlay_closes", None) or {}
-        for ov_id, ov in overlay_cfg.items():
-            if not getattr(ov, "enabled", False):
-                continue
-            tmpl = self._overlay_targets.get(ov_id)
-            if tmpl is None:
-                continue
-            # Auto-expand search ROI to at least template size, same as
-            # PK / Potion above. Centred popups rarely move, but a user
-            # drawing a tiny box shouldn't silently fail to match.
-            th, tw = tmpl.shape[:2]
-            if ov.cap_w < tw:
-                ov.cap_w = int(tw)
-            if ov.cap_h < th:
-                ov.cap_h = int(th)
-            roi = frame.crop(ov.cap, ov.cap_w, ov.cap_h)
-            score, local_xy, scale = _template_search(
-                roi, tmpl,
-                scale_legacy=5_000_000.0, scales=scales, _kind=f"overlay:{ov_id}",
-            )
-            match_xy: tuple[int, int] = (-1, -1)
-            if local_xy != (-1, -1):
-                match_xy = (ov.cap.x + local_xy[0], ov.cap.y + local_xy[1])
-            overlay_matches[ov_id] = OverlayMatch(
-                detected=round(score) >= int(ov.threshold),
-                score=score,
-                match_xy=match_xy,
-                match_scale=scale,
-            )
+        _ov_interval = float(getattr(settings, "overlay_scan_interval", 0.4) or 0.0)
+        _now_ov = time.monotonic()
+        _do_ov_scan = (
+            _ov_interval <= 0.0
+            or (_now_ov - self._overlay_last_at) >= _ov_interval
+        )
+        if not _do_ov_scan and self._overlay_cache:
+            overlay_matches: dict[str, OverlayMatch] = self._overlay_cache
+        else:
+            self._overlay_last_at = _now_ov
+            overlay_matches = {}
+            for ov_id, ov in overlay_cfg.items():
+                if not getattr(ov, "enabled", False):
+                    continue
+                tmpl = self._overlay_targets.get(ov_id)
+                if tmpl is None:
+                    continue
+                # Auto-expand search ROI to at least template size, same as
+                # PK / Potion above. Centred popups rarely move, but a user
+                # drawing a tiny box shouldn't silently fail to match.
+                th, tw = tmpl.shape[:2]
+                if ov.cap_w < tw:
+                    ov.cap_w = int(tw)
+                if ov.cap_h < th:
+                    ov.cap_h = int(th)
+                roi = frame.crop(ov.cap, ov.cap_w, ov.cap_h)
+                score, local_xy, scale = _template_search(
+                    roi, tmpl,
+                    scale_legacy=5_000_000.0, scales=scales, _kind=f"overlay:{ov_id}",
+                )
+                match_xy: tuple[int, int] = (-1, -1)
+                if local_xy != (-1, -1):
+                    match_xy = (ov.cap.x + local_xy[0], ov.cap.y + local_xy[1])
+                overlay_matches[ov_id] = OverlayMatch(
+                    detected=round(score) >= int(ov.threshold),
+                    score=score,
+                    match_xy=match_xy,
+                    match_scale=scale,
+                )
+            self._overlay_cache = overlay_matches
 
         return FrameAnalysis(
             hp=final_hp,

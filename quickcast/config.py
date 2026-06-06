@@ -513,6 +513,11 @@ class Settings(BaseModel):
     # 간격으로도 충분하고, OCR이 멀티 threshold로 무거워서 매 프레임이면
     # CPU 부담이 큼. 0 ⇒ 매 프레임(예전 동작). 기본 1.0초.
     ocr_scan_interval: float = Field(1.0, ge=0.0, le=10.0)
+    # 오버레이 자동닫기 인식 주기(초) — 펫호루라기/아이템획득/혈맹축복
+    # template matching을 매 프레임이 아닌 이 간격마다 실행. 팝업은 한번
+    # 뜨면 수 초 유지되므로 0.3~0.5초 간격으로도 충분히 빨리 닫고, 매
+    # 프레임 3개 템플릿 매칭을 줄여 CPU 절약. 0 ⇒ 매 프레임. 기본 0.4초.
+    overlay_scan_interval: float = Field(0.4, ge=0.0, le=5.0)
 
     # Slots — keyed by string id ("1".."9", "0", "11"+)
     slots: dict[str, Slot] = Field(default_factory=dict)
