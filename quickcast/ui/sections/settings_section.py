@@ -157,6 +157,30 @@ def _panel_connection() -> QWidget:
     )
     conn.add(_form_row("인식 스케일 단계", steps))
 
+    # OCR 인식 안정도 — 추론 시 여러 이진화 threshold를 시도해 가장 잘
+    # 읽힌 결과 채택. 글자 학습값은 그대로 두고 조명/배경 변화를 흡수.
+    ocr_steps = QComboBox(); ocr_steps.addItems([str(n) for n in range(1, 8)])
+    cur_ocr = max(1, min(7, int(getattr(mock_settings, "ocr_threshold_steps", 3) or 3)))
+    ocr_steps.setCurrentText(str(cur_ocr))
+    if cur_ocr != getattr(mock_settings, "ocr_threshold_steps", 3):
+        mock_settings.ocr_threshold_steps = cur_ocr
+    def _on_ocr_steps(text: str) -> None:
+        try:
+            new = int(text)
+        except ValueError:
+            return
+        if mock_settings.ocr_threshold_steps != new:
+            mock_settings.ocr_threshold_steps = new
+            bus.settings_dirty.emit()
+    ocr_steps.currentTextChanged.connect(_on_ocr_steps)
+    ocr_steps.setToolTip(
+        "OCR(버프 카운트·HP/MP/물약 숫자) 인식 안정도.\n"
+        "추론할 때 여러 이진화값을 시도해 가장 잘 읽힌 값을 채택 —\n"
+        "글자 재학습 없이 조명/배경 변화에 강해집니다.\n"
+        "1 = 단일(가장 빠름) / 3~5 = 안정(권장) / 7 = 최대"
+    )
+    conn.add(_form_row("OCR 인식 안정도", ocr_steps))
+
     v.addWidget(conn); v.addStretch(1)
     return w
 

@@ -496,27 +496,104 @@ def _apply_no_leading_zero(
             box_scores[start] = second_sc
 
 
+def _auto_threshold(roi_bgra: np.ndarray) -> int:
+    """The same auto binarisation value _binarise computes for None —
+    exposed so the multi-threshold wrapper can centre its candidate
+    sweep on it."""
+    if roi_bgra.ndim == 3:
+        gray = cv2.cvtColor(roi_bgra[:, :, :3], cv2.COLOR_BGR2GRAY)
+    else:
+        gray = roi_bgra
+    return max(int(np.percentile(gray, 75)), 140)
+
+
+# Threshold offset sweeps keyed by step count. Index 0 is always the
+# base value (no offset) so a 1-step run == the legacy single-threshold
+# behaviour. More steps widen the net around the base so a frame whose
+# lighting drifted from the trained value still finds a binarisation
+# that reproduces the learned glyph masks.
+_THRESHOLD_OFFSETS: dict[int, tuple[int, ...]] = {
+    1: (0,),
+    2: (0, -25),
+    3: (0, -25, 25),
+    4: (0, -20, 20, -40),
+    5: (0, -20, 20, -40, 40),
+    6: (0, -15, 15, -30, 30, -45),
+    7: (0, -15, 15, -30, 30, -45, 45),
+}
+
+
 def recognise(roi_bgra: np.ndarray,
                templates: dict[str, list[np.ndarray]],
                threshold: Optional[int] = None,
-               canonical: Optional[tuple[int, int]] = None) -> OcrResult:
-    """Run the full OCR pipeline on one ROI.
+               canonical: Optional[tuple[int, int]] = None,
+               threshold_steps: int = 1) -> OcrResult:
+    """Run the OCR pipeline, optionally sweeping multiple binarisation
+    thresholds and keeping the highest-confidence reading.
 
-    ``templates`` is now ``{label: [mask, ...]}`` — a list of learned
+    ``threshold_steps`` (1..7): how many binarisation values to try.
+      - 1  → single threshold (legacy behaviour, fastest).
+      - 3+ → centre on the base value (``threshold`` if given, else the
+             auto 75-percentile) and also try ±offsets. The HUD's
+             lighting / background drifts frame-to-frame, so the binary
+             mask that reproduces the trained glyph shapes shifts too;
+             trying a few nearby thresholds and taking the best score
+             recovers reads that a single fixed threshold would miss.
+             No retraining needed — the learned templates are untouched.
+
+    Cost scales linearly with the step count, but OCR only runs when a
+    text ROI is configured + the feature is enabled, so a 3–5 step
+    sweep on the small buff/HP/MP fields stays well under 1 ms.
+    """
+    if roi_bgra is None or roi_bgra.size == 0 or not templates:
+        return OcrResult(current=None, maximum=None, text="",
+                          confidence=0.0, glyphs=[])
+
+    steps = max(1, min(7, int(threshold_steps)))
+    if steps <= 1:
+        return _recognise_single(roi_bgra, templates, threshold, canonical)
+
+    base = threshold if threshold is not None else _auto_threshold(roi_bgra)
+    offsets = _THRESHOLD_OFFSETS.get(steps, _THRESHOLD_OFFSETS[5])
+    best: Optional[OcrResult] = None
+    seen: set[int] = set()
+    for off in offsets:
+        thr = int(max(0, min(255, base + off)))
+        if thr in seen:
+            continue
+        seen.add(thr)
+        r = _recognise_single(roi_bgra, templates, thr, canonical)
+        # Prefer the read with the most glyphs first (a threshold that
+        # only finds 1 of 2 digits shouldn't win on a high single-glyph
+        # score), then by confidence.
+        if r.text and (
+            best is None
+            or len(r.text) > len(best.text)
+            or (len(r.text) == len(best.text) and r.confidence > best.confidence)
+        ):
+            best = r
+    if best is not None:
+        return best
+    # Nothing matched at any threshold — return the base attempt so the
+    # caller still gets a (low-confidence) result rather than None.
+    return _recognise_single(roi_bgra, templates, threshold, canonical)
+
+
+def _recognise_single(roi_bgra: np.ndarray,
+                       templates: dict[str, list[np.ndarray]],
+                       threshold: Optional[int] = None,
+                       canonical: Optional[tuple[int, int]] = None) -> OcrResult:
+    """Run the full OCR pipeline on one ROI at ONE binarisation threshold.
+
+    ``templates`` is ``{label: [mask, ...]}`` — a list of learned
     instances per glyph. The matcher picks the highest-scoring instance
-    across all labels for each glyph in the ROI. The legacy
-    ``{label: mask}`` form is also accepted (treated as a single
-    instance) for backward compatibility.
+    across all labels for each glyph in the ROI.
 
-    ``threshold`` (0..255 or None) MUST match the binarisation value
-    the templates were learned at. Passing a different threshold makes
-    the runtime glyph masks diverge from the stored templates and
-    TM_CCOEFF_NORMED scores collapse — which manifests as "the same
-    digit fails to match itself" exactly like the user reported.
-
-    Returns ``OcrResult`` — see its docstring for field semantics.
-    A blank templates dict produces an empty result (no crash) so
-    callers can ship the OCR path before the user has learned glyphs.
+    ``threshold`` (0..255 or None) sets the binarisation value; None ==
+    auto 75-percentile. It MUST match (or be swept around — see
+    ``recognise``) the value the templates were learned at, else the
+    runtime glyph masks diverge from the stored templates and
+    TM_CCOEFF_NORMED scores collapse.
     """
     if roi_bgra is None or roi_bgra.size == 0 or not templates:
         return OcrResult(current=None, maximum=None, text="",

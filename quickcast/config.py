@@ -497,6 +497,11 @@ class Settings(BaseModel):
     # at, otherwise the binary masks differ and TM_CCOEFF_NORMED drops
     # well below 1.0 for what should be identical glyphs.
     ocr_threshold: int = 0
+    # OCR 인식 안정도 — 추론 시 base threshold 주변 몇 개의 이진화값을
+    # 시도해 가장 잘 읽힌 결과를 채택. 1=단일(가장 빠름), 3~5=조명/배경
+    # 변화에 강해짐(인식률↑, CPU 소폭↑). 재학습 불필요. scale_steps의
+    # threshold 축 버전. 기본 3.
+    ocr_threshold_steps: int = Field(3, ge=1, le=7)
 
     # Slots — keyed by string id ("1".."9", "0", "11"+)
     slots: dict[str, Slot] = Field(default_factory=dict)

@@ -606,6 +606,8 @@ class Recognizer:
         )
         if ocr_active:
             from quickcast.core.ocr import recognise, hp_percentage
+            # Multi-threshold sweep count — shared setting (인식 안정도).
+            ocr_steps = int(getattr(settings, "ocr_threshold_steps", 3) or 3)
             # Per-domain learned threshold (from digit_store .threshold
             # file) wins over the legacy global Settings.ocr_threshold
             # fallback. Both feed the same recognise() threshold arg —
@@ -626,7 +628,7 @@ class Recognizer:
                         profile.hp_text_cap_w, profile.hp_text_cap_h,
                     )
                     r = recognise(hp_text_roi, tpl, threshold=_thr_for("hp"),
-                                    canonical=canon)
+                                    canonical=canon, threshold_steps=ocr_steps)
                     ocr_hp = hp_percentage(r)
             # MP
             if profile.mp_text_cap_w > 0 and profile.mp_text_cap_h > 0:
@@ -637,7 +639,7 @@ class Recognizer:
                         profile.mp_text_cap_w, profile.mp_text_cap_h,
                     )
                     r = recognise(mp_text_roi, tpl, threshold=_thr_for("mp"),
-                                    canonical=canon)
+                                    canonical=canon, threshold_steps=ocr_steps)
                     ocr_mp = hp_percentage(r)
             # Potion — single-number field; 0 == empty.
             # Confidence threshold lowered to 0.45 (was 0.55) because a
@@ -653,7 +655,7 @@ class Recognizer:
                         profile.potion_text_cap_w, profile.potion_text_cap_h,
                     )
                     r = recognise(po_text_roi, tpl_po, threshold=_thr_for("potion"),
-                                    canonical=canon_po)
+                                    canonical=canon_po, threshold_steps=ocr_steps)
             else:
                 r = None
             if r is not None:
@@ -784,7 +786,9 @@ class Recognizer:
                         buff_roi, (bw * 2, bh * 2),
                         interpolation=cv2.INTER_CUBIC,
                     )
-                r = recognise(buff_roi, tpl, threshold=buff_thr, canonical=canon)
+                _buff_steps = int(getattr(settings, "ocr_threshold_steps", 3) or 3)
+                r = recognise(buff_roi, tpl, threshold=buff_thr, canonical=canon,
+                              threshold_steps=_buff_steps)
                 buff_scanned = True
                 buff_text = r.text
                 buff_confidence = float(r.confidence)
