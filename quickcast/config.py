@@ -370,6 +370,12 @@ class ClientProfile(BaseModel):
     # re-attaches it to whichever client_id is currently active, so each
     # tab can independently decide whether to show the magnet button.
     floater_enabled: bool = True
+    # User-dragged floater position as a fraction of the game window's
+    # client rect (top-left anchor). -1 = never dragged → default
+    # top-right corner. Persisted per-tab so the floater stays where the
+    # user put it across re-attaches and app restarts.
+    floater_pos_x: float = -1.0
+    floater_pos_y: float = -1.0
 
     # Input backend per client — each tab targets a different HWND, so
     # PostMessage/AttachInput must be wired per-client.

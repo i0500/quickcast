@@ -246,11 +246,34 @@ class FloatingSwitch(QWidget):
         if not hwnd or not is_window_alive(hwnd):
             self.detach()
             return
-        self._target_hwnd = hwnd
-        self._user_offset = None
+        # Preserve the user's dragged position when re-attaching to the
+        # SAME window — game_window_found fires repeatedly (auto window
+        # detection, capture hot-swap, tab broadcasts) and each call used
+        # to reset _user_offset to None, snapping the floater back to the
+        # default top-right corner. Only reset when binding a genuinely
+        # different hwnd (then restore the per-client saved position).
+        same_target = (self._target_hwnd == int(hwnd))
+        self._target_hwnd = int(hwnd)
+        if not same_target:
+            self._user_offset = self._load_saved_offset()
         self._tracker.start()
         self._track()
         self.show()
+
+    def _load_saved_offset(self):
+        """Read this client's saved floater position (ratio) from its
+        ClientProfile, or None if never dragged (→ default anchor)."""
+        prof = self._client_profile()
+        if prof is None:
+            return None
+        try:
+            rx = getattr(prof, "floater_pos_x", -1.0)
+            ry = getattr(prof, "floater_pos_y", -1.0)
+            if rx is not None and ry is not None and rx >= 0.0 and ry >= 0.0:
+                return (float(rx), float(ry))
+        except Exception:
+            pass
+        return None
 
     def detach(self) -> None:
         self._target_hwnd = None
@@ -630,10 +653,20 @@ class FloatingSwitch(QWidget):
         # anchor point (mirrors how _track positions it).
         w = max(1, rect.right - rect.left)
         h = max(1, rect.bottom - rect.top)
-        self._user_offset = (
-            (self.x() - rect.left) / float(w),
-            (self.y() - rect.top) / float(h),
-        )
+        rx = (self.x() - rect.left) / float(w)
+        ry = (self.y() - rect.top) / float(h)
+        self._user_offset = (rx, ry)
+        # Persist into this client's ClientProfile so the position
+        # survives re-attaches AND app restarts.
+        prof = self._client_profile()
+        if prof is not None:
+            try:
+                prof.floater_pos_x = float(rx)
+                prof.floater_pos_y = float(ry)
+                from quickcast.ui.design.signals import bus
+                bus.settings_dirty.emit()
+            except Exception:
+                pass
 
     # ───────── paint ─────────
     def paintEvent(self, _e) -> None:
