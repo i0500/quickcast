@@ -508,6 +508,11 @@ class Settings(BaseModel):
     # 변화에 강해짐(인식률↑, CPU 소폭↑). 재학습 불필요. scale_steps의
     # threshold 축 버전. 기본 3.
     ocr_threshold_steps: int = Field(3, ge=1, le=7)
+    # OCR 인식 주기(초) — 버프 카운트·HP/MP/물약 숫자 OCR을 매 프레임이
+    # 아니라 이 간격마다 한 번만 실행. 마을 대기 판정은 분 단위라 1초
+    # 간격으로도 충분하고, OCR이 멀티 threshold로 무거워서 매 프레임이면
+    # CPU 부담이 큼. 0 ⇒ 매 프레임(예전 동작). 기본 1.0초.
+    ocr_scan_interval: float = Field(1.0, ge=0.0, le=10.0)
 
     # Slots — keyed by string id ("1".."9", "0", "11"+)
     slots: dict[str, Slot] = Field(default_factory=dict)

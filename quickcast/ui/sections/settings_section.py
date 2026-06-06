@@ -181,6 +181,33 @@ def _panel_connection() -> QWidget:
     )
     conn.add(_form_row("OCR 인식 안정도", ocr_steps))
 
+    # OCR 인식 주기 — 버프 카운트(마을 대기) OCR을 매 프레임이 아닌 이
+    # 간격마다 실행. 마을 판정은 분 단위라 1~2초로도 충분, CPU 크게 절약.
+    _OCR_INTERVALS = [("매 프레임", 0.0), ("0.5초", 0.5), ("1초", 1.0),
+                       ("2초", 2.0), ("3초", 3.0), ("5초", 5.0)]
+    ocr_int = QComboBox()
+    for lbl, _v in _OCR_INTERVALS:
+        ocr_int.addItem(lbl)
+    cur_int = float(getattr(mock_settings, "ocr_scan_interval", 1.0) or 0.0)
+    # 가장 가까운 프리셋 선택.
+    _idx = min(range(len(_OCR_INTERVALS)),
+               key=lambda i: abs(_OCR_INTERVALS[i][1] - cur_int))
+    ocr_int.setCurrentIndex(_idx)
+    def _on_ocr_int(idx: int) -> None:
+        if idx < 0 or idx >= len(_OCR_INTERVALS):
+            return
+        new = _OCR_INTERVALS[idx][1]
+        if abs(float(getattr(mock_settings, "ocr_scan_interval", 1.0) or 0.0) - new) > 1e-6:
+            mock_settings.ocr_scan_interval = new
+            bus.settings_dirty.emit()
+    ocr_int.currentIndexChanged.connect(_on_ocr_int)
+    ocr_int.setToolTip(
+        "버프 카운트(마을 대기) OCR 실행 주기.\n"
+        "마을 판정은 분 단위라 1~2초 간격으로도 충분하고 CPU를 크게\n"
+        "절약합니다. '매 프레임'은 가장 빠르지만 무거움. 기본 1초."
+    )
+    conn.add(_form_row("OCR 인식 주기", ocr_int))
+
     v.addWidget(conn); v.addStretch(1)
     return w
 

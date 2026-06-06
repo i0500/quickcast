@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import time
+
 import cv2
 import numpy as np
 
@@ -445,6 +447,17 @@ class Recognizer:
         # for the confidence-weighted voting rule.
         self._buff_history: list[tuple[int, float]] = []
         self._buff_smoothed: Optional[int] = None
+        # OCR scan throttle — OCR (digit template matching, optionally
+        # multi-threshold) is the heaviest per-frame cost, and the values
+        # it reads (buff count for town-idle, HP/MP/potion numbers) don't
+        # need 10 fps freshness. We run OCR at most once per
+        # ``settings.ocr_scan_interval`` seconds and reuse the cached
+        # result on intervening frames. ``_ocr_last_at`` is the monotonic
+        # timestamp of the last real scan; ``_ocr_cache`` holds the last
+        # computed (ocr_hp, ocr_mp, ocr_potion_empty, ocr_potion_score,
+        # buff_* ) tuple so analyze() can short-circuit cheaply.
+        self._ocr_last_at: float = 0.0
+        self._ocr_cache: Optional[dict] = None
         # Window of frames considered for the vote. At ~10 fps this
         # is ~1 second of jitter rejection without lagging real changes.
         self._buff_window: int = 10
@@ -757,7 +770,30 @@ class Recognizer:
         if buff_cfg is not None and bool(getattr(buff_cfg, "enabled", False)) \
                 and profile.buff_text_cap_w > 0 and profile.buff_text_cap_h > 0:
             tpl, canon = self._templates_for("buff")
+            # ── OCR scan throttle ──
+            # Buff OCR (multi-threshold digit matching on a 2× upsampled
+            # ROI) is the single heaviest per-frame operation. The town-
+            # idle trigger it feeds is a minutes-scale decision, so there's
+            # no value in re-reading it every capture frame. Run it at most
+            # once per ``settings.ocr_scan_interval`` seconds; on the
+            # in-between frames reuse the cached smoothed value so the
+            # town-idle timer in the controller still sees a continuous
+            # ``buff_scanned=True`` stream. interval=0 → every frame.
+            _ocr_interval = float(getattr(settings, "ocr_scan_interval", 1.0) or 0.0)
+            _now_ocr = time.monotonic()
+            _do_buff_scan = (
+                _ocr_interval <= 0.0
+                or (_now_ocr - self._ocr_last_at) >= _ocr_interval
+            )
+            if tpl and not _do_buff_scan and self._ocr_cache is not None:
+                # Reuse last scan — keeps CPU near zero on skipped frames.
+                buff_count = self._ocr_cache.get("buff_count")
+                buff_confidence = float(self._ocr_cache.get("buff_confidence", 0.0))
+                buff_text = self._ocr_cache.get("buff_text", "")
+                buff_scanned = True
+                tpl = None    # fall through past the real-scan block below
             if tpl:
+                self._ocr_last_at = _now_ocr
                 from quickcast.core.ocr import recognise
                 # Per-domain learned threshold wins over the legacy global
                 # Settings.ocr_threshold so retraining HP/MP doesn't break
@@ -838,6 +874,12 @@ class Recognizer:
                 # buff_count exposes the smoothed value; trigger + UI
                 # labels read from this, not the raw per-frame number.
                 buff_count = self._buff_smoothed
+                # Cache for the throttled (skipped) frames in between scans.
+                self._ocr_cache = {
+                    "buff_count": buff_count,
+                    "buff_confidence": buff_confidence,
+                    "buff_text": buff_text,
+                }
 
         # Prefer OCR readings when valid (non-None, learnt templates
         # produced a confident parse). Falls back to legacy detectors
