@@ -913,7 +913,7 @@ class Recognizer:
         # dict on the frames in between. The controller's sustain /
         # cooldown logic is monotonic-time based, so the ESC still fires
         # on time even though detection is sampled at a coarser rate.
-        overlay_cfg = getattr(settings, "overlay_closes", None) or {}
+        overlay_cfg = getattr(profile, "overlay_closes", None) or {}
         _ov_interval = float(getattr(settings, "overlay_scan_interval", 0.4) or 0.0)
         _now_ov = time.monotonic()
         _do_ov_scan = (
@@ -947,12 +947,24 @@ class Recognizer:
                 match_xy: tuple[int, int] = (-1, -1)
                 if local_xy != (-1, -1):
                     match_xy = (ov.cap.x + local_xy[0], ov.cap.y + local_xy[1])
+                _detected = round(score) >= int(ov.threshold)
                 overlay_matches[ov_id] = OverlayMatch(
-                    detected=round(score) >= int(ov.threshold),
+                    detected=_detected,
                     score=score,
                     match_xy=match_xy,
                     match_scale=scale,
                 )
+                # Diagnostic — only when detected, so the log stays quiet
+                # until a popup actually appears. Lets us see whether the
+                # score crossed threshold (recognition side OK → if no ESC
+                # follows, the controller's sustain/cooldown/latch is the
+                # blocker) vs never crossing (calibration / ROI issue).
+                if _detected:
+                    _ptag = getattr(profile, "label", "") or ""
+                    logger.info(
+                        f"🔍 [{_ptag}] 오버레이 '{ov_id}' 감지 "
+                        f"score={int(score):,} ≥ 임계 {int(ov.threshold):,}"
+                    )
             self._overlay_cache = overlay_matches
 
         return FrameAnalysis(
