@@ -79,6 +79,8 @@ class MacroController:
         # 오버레이가 처음 감지된 시각 — sustain_seconds 동안 연속 유지될
         # 때만 close_key를 보낸다. detected=False가 되면 즉시 클리어.
         self._overlay_first_seen_at: dict[str, float] = {}
+        # Per-overlay throttle for diagnostic logging (≤ 1 line / 2s).
+        self._last_diag_at: dict[str, float] = {}
         # Town-idle trigger — timestamp of the first frame where the
         # buff badge stopped matching. Cleared when the badge returns
         # (full count restored) or recovery sequence fires. None means
@@ -451,11 +453,21 @@ class MacroController:
         if not cfg or not matches:
             return
         now = time.monotonic()
+        _tag = getattr(self.profile, "label", "") or self.client_id
         for ov_id, ov in cfg.items():
             if not getattr(ov, "enabled", False):
                 continue
             m = matches.get(ov_id)
             if m is None:
+                # Diagnostic: enabled overlay has NO match entry — means
+                # recognition isn't scanning it (key mismatch / template
+                # missing). Throttled so it doesn't spam.
+                if (now - self._last_diag_at.get(ov_id, 0.0)) > 2.0:
+                    self._last_diag_at[ov_id] = now
+                    logger.info(
+                        f"⚠️ [{_tag}] 오버레이 '{ov_id}' 활성인데 인식 결과 없음 "
+                        f"(템플릿/키 불일치 의심)"
+                    )
                 continue
             if not m.detected:
                 # Popup gone — release the latch so the next appearance fires.
@@ -463,6 +475,15 @@ class MacroController:
                 self._overlay_first_seen_at.pop(ov_id, None)
                 continue
             if ov_id in self._overlay_handled:
+                # Already fired ESC for this popup appearance — waiting for
+                # it to go undetected before re-arming. Diagnostic so we
+                # can see this is the "stuck latched" case.
+                if (now - self._last_diag_at.get(ov_id, 0.0)) > 2.0:
+                    self._last_diag_at[ov_id] = now
+                    logger.info(
+                        f"ℹ️ [{_tag}] 오버레이 '{ov_id}' 이미 닫기 처리됨 "
+                        f"(팝업 사라질 때까지 대기)"
+                    )
                 continue
             # 3초 유지(또는 ov.sustain_seconds) — 첫 감지 시각을 기록하고
             # 연속으로 sustain_seconds 동안 detected 가 유지될 때만 통과.
@@ -472,6 +493,12 @@ class MacroController:
                 self._overlay_first_seen_at[ov_id] = now
                 first_seen = now
             if sustain > 0.0 and (now - first_seen) < sustain:
+                if (now - self._last_diag_at.get(ov_id, 0.0)) > 2.0:
+                    self._last_diag_at[ov_id] = now
+                    logger.info(
+                        f"⏳ [{_tag}] 오버레이 '{ov_id}' 감지 유지 "
+                        f"{now - first_seen:.1f}/{sustain:.1f}s (대기 중)"
+                    )
                 continue
             cooldown = max(0.1, float(ov.cooldown_seconds))
             last = self._last_overlay_close_at.get(ov_id, 0.0)

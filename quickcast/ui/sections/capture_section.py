@@ -1274,10 +1274,18 @@ def _build_overlay_close_card() -> "QWidget":
             entry = scores.get(ov_id) if scores else None
             if entry is None:
                 lbl.setText("점수: -")
+                lbl.setStyleSheet(
+                    f"color:{T.palette.text_tertiary}; font-family:{T.type.mono};")
                 continue
             s = int(entry.get("score", 0) or 0)
             hit = bool(entry.get("detected"))
-            lbl.setText(f"점수: {s:,}{'  ✓' if hit else ''}")
+            lbl.setText(f"점수: {s:,}{'  감지 ✓' if hit else ''}")
+            # detected → 주황색 강조 (전투 PK/물약 카드와 동일 패턴).
+            lbl.setStyleSheet(
+                f"color:{T.palette.state_warning if hit else T.palette.text_tertiary};"
+                f" font-family:{T.type.mono};"
+                f" font-weight:{700 if hit else 400};"
+            )
     try:
         bus.overlay_scores.connect(_on_overlay_scores)
     except Exception:
