@@ -309,6 +309,32 @@ class FloatingSwitch(QWidget):
         # redundant native calls every tick.
         if abs(self.windowOpacity() - target) > 0.01:
             self.setWindowOpacity(target)
+            # setWindowOpacity toggles the WS_EX_LAYERED window style on
+            # Windows, which can drop the window out of the always-on-top
+            # band (WindowStaysOnTopHint) — the floater then sinks behind
+            # the game on the next focus change. Re-assert HWND_TOPMOST
+            # right after, with NOACTIVATE so we don't steal focus. Only
+            # runs when opacity actually changes (foreground flip), so no
+            # per-frame flicker.
+            try:
+                import ctypes
+                from ctypes import wintypes, c_int, c_uint
+                user32 = ctypes.windll.user32
+                user32.SetWindowPos.argtypes = [
+                    wintypes.HWND, wintypes.HWND,
+                    c_int, c_int, c_int, c_int, c_uint,
+                ]
+                HWND_TOPMOST = wintypes.HWND(-1)
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                SWP_NOACTIVATE = 0x0010
+                user32.SetWindowPos(
+                    wintypes.HWND(int(self.winId())), HWND_TOPMOST,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            except Exception:
+                pass
 
     def set_theme(self, _theme_id: str) -> None:
         pass
