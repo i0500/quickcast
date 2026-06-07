@@ -79,6 +79,12 @@ class MacroController:
         # 오버레이가 처음 감지된 시각 — sustain_seconds 동안 연속 유지될
         # 때만 close_key를 보낸다. detected=False가 되면 즉시 클리어.
         self._overlay_first_seen_at: dict[str, float] = {}
+        # 마지막으로 detected=True 였던 시각. overlay 인식은 scan_interval
+        # 마다 샘플링되므로(매 프레임 아님), 재스캔 사이 잠깐 미감지가
+        # 나와도 sustain 타이머를 즉시 리셋하지 않고 이 시각 기준 grace
+        # 안이면 "계속 감지 중"으로 본다. 스캔 간격과 sustain 판정을
+        # 분리하는 핵심.
+        self._overlay_last_detected_at: dict[str, float] = {}
         # Per-overlay throttle for diagnostic logging (≤ 1 line / 2s).
         self._last_diag_at: dict[str, float] = {}
         # Town-idle trigger — timestamp of the first frame where the
@@ -454,51 +460,43 @@ class MacroController:
             return
         now = time.monotonic()
         _tag = getattr(self.profile, "label", "") or self.client_id
+        # overlay 인식 샘플링 간격 — 재스캔 사이 일시적 미감지를 흡수할
+        # grace 계산에 쓴다. 스캔 간격의 2배 + 0.5s 여유면 "한 번 샘플을
+        # 놓쳐도 연속으로 간주"하기에 충분.
+        _scan_interval = float(getattr(self.settings, "overlay_scan_interval", 0.4) or 0.0)
+        _release_grace = max(_scan_interval * 2.0 + 0.5, 1.0)
         for ov_id, ov in cfg.items():
             if not getattr(ov, "enabled", False):
                 continue
             m = matches.get(ov_id)
             if m is None:
-                # Diagnostic: enabled overlay has NO match entry — means
-                # recognition isn't scanning it (key mismatch / template
-                # missing). Throttled so it doesn't spam.
-                if (now - self._last_diag_at.get(ov_id, 0.0)) > 2.0:
-                    self._last_diag_at[ov_id] = now
-                    logger.info(
-                        f"⚠️ [{_tag}] 오버레이 '{ov_id}' 활성인데 인식 결과 없음 "
-                        f"(템플릿/키 불일치 의심)"
-                    )
                 continue
-            if not m.detected:
-                # Popup gone — release the latch so the next appearance fires.
-                self._overlay_handled.discard(ov_id)
-                self._overlay_first_seen_at.pop(ov_id, None)
+            if m.detected:
+                # 임계 넘은 상태 — 마지막 감지 시각 갱신.
+                self._overlay_last_detected_at[ov_id] = now
+            else:
+                # 미감지 — 마지막 감지로부터 grace 안이면 "재스캔 사이
+                # 일시적 미감지"로 보고 타이머 유지(continue로 발동 보류).
+                # grace를 넘었으면 팝업이 정말 사라진 것 → latch/타이머 리셋.
+                last_det = self._overlay_last_detected_at.get(ov_id, 0.0)
+                if last_det == 0.0 or (now - last_det) > _release_grace:
+                    self._overlay_handled.discard(ov_id)
+                    self._overlay_first_seen_at.pop(ov_id, None)
+                    self._overlay_last_detected_at.pop(ov_id, None)
                 continue
             if ov_id in self._overlay_handled:
-                # Already fired ESC for this popup appearance — waiting for
-                # it to go undetected before re-arming. Diagnostic so we
-                # can see this is the "stuck latched" case.
-                if (now - self._last_diag_at.get(ov_id, 0.0)) > 2.0:
-                    self._last_diag_at[ov_id] = now
-                    logger.info(
-                        f"ℹ️ [{_tag}] 오버레이 '{ov_id}' 이미 닫기 처리됨 "
-                        f"(팝업 사라질 때까지 대기)"
-                    )
+                # 이미 이 팝업에 대해 ESC 발사함 — 사라질 때까지 대기.
                 continue
-            # 3초 유지(또는 ov.sustain_seconds) — 첫 감지 시각을 기록하고
-            # 연속으로 sustain_seconds 동안 detected 가 유지될 때만 통과.
+            # ── sustain: 임계 넘은 상태가 누적 sustain_seconds 이상이면
+            # 발동. 스캔 간격과 무관 — first_seen은 "임계 넘기 시작한
+            # 시각"이고, 위 grace 로직이 재스캔 사이 흔들림을 흡수하므로
+            # first_seen이 끊기지 않고 누적된다. ──
             sustain = max(0.0, float(getattr(ov, "sustain_seconds", 0.0) or 0.0))
             first_seen = self._overlay_first_seen_at.get(ov_id)
             if first_seen is None:
                 self._overlay_first_seen_at[ov_id] = now
                 first_seen = now
             if sustain > 0.0 and (now - first_seen) < sustain:
-                if (now - self._last_diag_at.get(ov_id, 0.0)) > 2.0:
-                    self._last_diag_at[ov_id] = now
-                    logger.info(
-                        f"⏳ [{_tag}] 오버레이 '{ov_id}' 감지 유지 "
-                        f"{now - first_seen:.1f}/{sustain:.1f}s (대기 중)"
-                    )
                 continue
             cooldown = max(0.1, float(ov.cooldown_seconds))
             last = self._last_overlay_close_at.get(ov_id, 0.0)
