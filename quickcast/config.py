@@ -445,6 +445,12 @@ class ClientProfile(BaseModel):
                 cap_h=77,
                 threshold=3_500_000,
             ),
+            "cube_item": OverlayClose(
+                cap=Point(x=594, y=172),
+                cap_w=90,
+                cap_h=90,
+                threshold=3_500_000,
+            ),
         }
     )
 
@@ -604,6 +610,15 @@ class Settings(BaseModel):
                 cap=Point(x=594, y=94),
                 cap_w=85,
                 cap_h=77,
+                threshold=3_500_000,
+            ),
+            # cube_item: 큐브 아이템 획득 팝업. 제목은 "아이템 획득"으로
+            # 동일하나 큐브 보상 아이콘 행이 일반 보상 상자보다 아래쪽에
+            # 위치 → ROI 중심 (639,216) 으로 item_acquired 보다 ~84px 아래.
+            "cube_item": OverlayClose(
+                cap=Point(x=594, y=172),
+                cap_w=90,
+                cap_h=90,
                 threshold=3_500_000,
             ),
         }
@@ -1083,6 +1098,31 @@ class Settings(BaseModel):
             s.potion.threshold = 150_000
         if s.pk.threshold > 5_000_000:
             s.pk.threshold = 3_000_000
+        # Backfill overlay-close entries that ship as code defaults but are
+        # missing from an older userdata.json (e.g. cube_item added after
+        # the user's file was written). Without this the key only lands in
+        # whichever overlay_closes block the capture card lazily seeds,
+        # leaving the dashboard sidebar toggle / preview ROI / other client
+        # profiles blind to it (= "토글 연동 안 됨"). Mutate in place so any
+        # user-tuned values for keys that already exist are preserved.
+        try:
+            _ov_def = cls.model_fields["overlay_closes"].default_factory() or {}
+            _prof_ov_def = (
+                ClientProfile.model_fields["overlay_closes"].default_factory() or {}
+            )
+
+            def _backfill_ov(target, defaults) -> None:
+                if not isinstance(target, dict):
+                    return
+                for _k, _v in defaults.items():
+                    if _k not in target:
+                        target[_k] = _v.model_copy(deep=True)
+
+            _backfill_ov(s.overlay_closes, _ov_def)
+            for _prof in s.clients.values():
+                _backfill_ov(getattr(_prof, "overlay_closes", None), _prof_ov_def)
+        except Exception:
+            pass
         return s
 
     @classmethod

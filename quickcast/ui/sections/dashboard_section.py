@@ -736,6 +736,8 @@ def make_dashboard() -> tuple[QWidget, QWidget]:
         sv.addWidget(_sidebar_quick_toggle("아이템 획득 닫기", _ovc["item_acquired"], "enabled"))
     if "blood_pledge" in _ovc:
         sv.addWidget(_sidebar_quick_toggle("혈맹 축복 닫기", _ovc["blood_pledge"], "enabled"))
+    if "cube_item" in _ovc:
+        sv.addWidget(_sidebar_quick_toggle("큐브 아이템 획득 닫기", _ovc["cube_item"], "enabled"))
     sv.addWidget(_sidebar_town_idle_toggle())
 
     sk_head = QLabel("스킬 토글")

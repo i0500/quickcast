@@ -56,6 +56,7 @@ OVERLAY_ROI_DEFS: list[tuple[str, str, QColor]] = [
     ("overlay:pet_whistle",   "펫 호루라기",   QColor(255, 145, 215)),   # pink
     ("overlay:item_acquired", "아이템 획득",   QColor(255, 200, 100)),   # amber
     ("overlay:blood_pledge",  "혈맹 축복",     QColor(200, 130, 130)),   # muted red
+    ("overlay:cube_item",     "큐브 아이템",   QColor(140, 210, 160)),   # green
 ]
 
 

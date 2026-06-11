@@ -563,6 +563,30 @@ class FloatingSwitch(QWidget):
         if bool(p.slots[sid].use) == on:
             return
         p.slots[sid].use = on
+        # When this floater drives the LIVE client (active tab, or the
+        # legacy single-client case) — the same data `slot_state` mirrors —
+        # push the change through the shared slot_state store as well. The
+        # dashboard sidebar skill rows (_SidebarSkillRow) react to
+        # `slot_state.slot_toggled`, NOT `bus.slot_state_refresh`, so a bare
+        # p.slots write left them stale: toggling here updated the floater
+        # but not the sidebar (사이드바→플로팅은 되는데 플로팅→사이드바만
+        # 안 되던 단방향 동기화 누락). state_bridge mirrors slot_toggled back
+        # into mock_settings and broadcasts settings_dirty/slot_state_refresh
+        # for the combat card + our own panel, so we can return after it.
+        s = self._settings
+        live = s is not None and (
+            not self._client_id
+            or self._client_id == getattr(s, "active_client_id", None)
+        )
+        if live:
+            from quickcast.ui.sections._mock_state import slot_state
+            if slot_state.is_on(sid) != on:
+                # Pre-snapshot use-state so the slot_toggled round-trip
+                # refresh isn't misread as an auto-off event that pops our
+                # panel open.
+                self._prev_use = self._collect_use_state()
+                slot_state.set_on(sid, on)
+                return
         self._broadcast_change()
 
     def _broadcast_change(self) -> None:

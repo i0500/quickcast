@@ -1056,7 +1056,23 @@ _OVERLAY_LABELS: dict[str, str] = {
     "pet_whistle": "펫 호루라기 (교감 성공 발바닥)",
     "item_acquired": "아이템 획득 (보상 상자)",
     "blood_pledge": "혈맹 축복 활성화",
+    "cube_item": "큐브 아이템 획득",
 }
+
+
+def _shipped_overlay_default(ov_id: str):
+    """Return a fresh OverlayClose matching the code-shipped default for
+    ``ov_id`` (e.g. cube_item's lower ROI), or None when the id has no
+    shipped default. Lets a newly-introduced overlay seed onto its own
+    calibrated box instead of borrowing item_acquired's top-centre one."""
+    from quickcast.config import Settings
+    try:
+        factory = Settings.model_fields["overlay_closes"].default_factory
+        defaults = factory() if factory else {}
+    except Exception:
+        return None
+    src = defaults.get(ov_id)
+    return src.model_copy(deep=True) if src is not None else None
 
 
 def _build_overlay_close_card() -> "QWidget":
@@ -1089,27 +1105,33 @@ def _build_overlay_close_card() -> "QWidget":
         # Pull/create the OverlayClose entry — gracefully handles a
         # legacy userdata.json that predates this feature. When a new
         # overlay is being added (e.g. blood_pledge introduced after
-        # the user already calibrated pet/item), seed it from the
-        # existing item_acquired / pet_whistle so it lines up with
-        # the centered-popup area the user has already dialed in.
+        # the user already calibrated pet/item), prefer the code's own
+        # default for that exact id (so e.g. cube_item lands on its
+        # lower ROI, not item_acquired's top-centre box). Only fall back
+        # to copying item_acquired / pet_whistle when the id has no
+        # shipped default.
         oc_dict = getattr(mock_settings, "overlay_closes", None)
         if oc_dict is None:
             mock_settings.overlay_closes = {}    # type: ignore[attr-defined]
             oc_dict = mock_settings.overlay_closes
         if ov_id not in oc_dict:
-            seed = oc_dict.get("item_acquired") or oc_dict.get("pet_whistle")
-            if seed is not None:
-                oc_dict[ov_id] = OverlayClose(
-                    cap=Point(x=seed.cap.x, y=seed.cap.y),
-                    cap_w=int(seed.cap_w),
-                    cap_h=int(seed.cap_h),
-                    threshold=int(seed.threshold),
-                    close_key=seed.close_key,
-                    cooldown_seconds=float(seed.cooldown_seconds),
-                    sustain_seconds=float(seed.sustain_seconds),
-                )
+            shipped = _shipped_overlay_default(ov_id)
+            if shipped is not None:
+                oc_dict[ov_id] = shipped
             else:
-                oc_dict[ov_id] = OverlayClose()
+                seed = oc_dict.get("item_acquired") or oc_dict.get("pet_whistle")
+                if seed is not None:
+                    oc_dict[ov_id] = OverlayClose(
+                        cap=Point(x=seed.cap.x, y=seed.cap.y),
+                        cap_w=int(seed.cap_w),
+                        cap_h=int(seed.cap_h),
+                        threshold=int(seed.threshold),
+                        close_key=seed.close_key,
+                        cooldown_seconds=float(seed.cooldown_seconds),
+                        sustain_seconds=float(seed.sustain_seconds),
+                    )
+                else:
+                    oc_dict[ov_id] = OverlayClose()
         ov = oc_dict[ov_id]
         _ensure_default_roi(ov)
 
@@ -1261,9 +1283,10 @@ def _build_overlay_close_card() -> "QWidget":
 
         return wrap
 
-    # 펫 호루라기 + 아이템 획득 + 혈맹 축복 셋 다 노출. 같은 ROI(중앙 팝업
-    # 영역)와 임계값 기본값을 공유하므로 UI 형태는 완전히 동일.
-    for ov_id in ("pet_whistle", "item_acquired", "blood_pledge"):
+    # 펫 호루라기 + 아이템 획득 + 혈맹 축복 + 큐브 아이템 획득 노출. 앞 셋은
+    # 같은 중앙 상단 ROI/임계값을 공유하고, 큐브 아이템은 같은 팝업 계열이나
+    # 보상 아이콘이 더 아래쪽이라 ROI 만 별도 기본값. UI 형태는 동일.
+    for ov_id in ("pet_whistle", "item_acquired", "blood_pledge", "cube_item"):
         card.add(_make_row(ov_id))
 
     # Wire live overlay scores from the analysis stream into the score
