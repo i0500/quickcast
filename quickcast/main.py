@@ -252,8 +252,11 @@ def run() -> None:
     except Exception:
         logger.exception("앱 아이콘 로드 실패")
     from quickcast.ui.components.splash import show_splash, pyi_close
-    pyi_close()
+    # Qt 스플래시를 먼저 띄운다(프레임리스 + 항상 위라 네이티브 부트로더
+    # 스플래시를 덮는다). 그 다음 네이티브를 닫아야, 네이티브가 먼저 꺼지고
+    # Qt가 늦게 뜨는 "꺼졌다 다시 뜨는" 이중 로딩 깜빡임이 사라진다.
     splash = show_splash()
+    pyi_close()
     splash.update_message("설정 로드 중…", 5)
 
     loaded = Settings.load()

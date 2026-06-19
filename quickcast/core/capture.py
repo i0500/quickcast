@@ -116,6 +116,34 @@ class CaptureSource(Protocol):
     def close(self) -> None: ...
 
 
+class BlankCapture:
+    """검은 프레임만 내보내는 캡처 소스. 캡처 대상을 '지우기' 했을 때 컨트롤러
+    캡처를 이걸로 바꿔, 모니터링 화면이 이전 게임창에 멈춰 있지 않고 검은
+    화면(=대상 없음)을 보이게 한다. 검은 프레임이라 HP/MP·PK·물약 인식은
+    모두 무반응(매치 없음)이 되지만, 보통 대상을 지우는 시점은 매크로를 멈춘
+    상태라 무해하다."""
+
+    def __init__(self) -> None:
+        self._frame = np.zeros((TARGET_H, TARGET_W, 4), dtype=np.uint8)
+        self._frame[:, :, 3] = 255          # 불투명 알파
+        self.last_source_size: tuple[int, int] = (0, 0)
+        self.last_window_dpi: int = 96
+
+    @property
+    def description(self) -> str:
+        return "대상 없음"
+
+    @property
+    def healthy(self) -> bool:
+        return True
+
+    def grab(self) -> Frame:
+        return Frame(image=self._frame)
+
+    def close(self) -> None:
+        pass
+
+
 class _MssBase:
     """Shared mss + per-thread isolation + resize helpers."""
     def __init__(self) -> None:

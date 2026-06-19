@@ -402,6 +402,58 @@ def make_capture() -> tuple[QWidget, QWidget]:
     roi = Card("ROI 좌표 — 1280×720 기준",
                 subtitle="미리보기 위에서 사각형 드래그가 더 직관적")
 
+    # ── HP/MP 게이지 자동 찾기 (리니지W 좌측 상단) ──
+    # 현재 캡처 프레임의 좌측 상단에서 빨강(HP)·파랑(MP) 막대를 찾아 HP/MP ROI
+    # 사각형을 자동 셋팅한다. core.bar_locator 가 실제 탐지를 담당하며, 결과는
+    # 활성 클라(현재 탭)의 hp_cap/mp_cap 에만 기록된다 — bus.live_frame 이 활성
+    # 컨트롤러 프레임만 주므로 클라 탭별 독립이 자동 보장된다.
+    autobar_row = QHBoxLayout(); autobar_row.setSpacing(8)
+    autobar_btn = IconButton("HP/MP 게이지 자동 찾기", "crosshair", variant="primary")
+    autobar_btn.setToolTip(
+        "현재 캡처 화면의 좌측 상단에서 빨강(HP)·파랑(MP) 막대를 찾아\n"
+        "HP/MP ROI를 자동으로 맞춥니다. 게이지가 가득 찬 상태에서 누르면\n"
+        "가장 정확합니다. (결과는 현재 탭(클라)에만 적용됩니다.)"
+    )
+    autobar_status = QLabel("")
+    reactive(autobar_status, lambda: f"color:{T.palette.text_secondary};")
+
+    def _auto_find_bars() -> None:
+        frame = state.get("frame")
+        if frame is None:
+            QMessageBox.information(main, "게이지 자동 찾기",
+                "캡처가 활성화된 후 시도해주세요. (게임창 선택 + 마스터 시작)")
+            return
+        try:
+            from quickcast.core.bar_locator import locate_hp_mp_bars
+            res = locate_hp_mp_bars(frame)
+        except Exception:
+            autobar_status.setText("자동 찾기 오류 — 로그를 확인하세요")
+            return
+        applied: list[str] = []
+        hp = res.get("hp")
+        if hp:
+            x, y, w, h = hp
+            mock_settings.hp_cap.x = int(x); mock_settings.hp_cap.y = int(y)
+            mock_settings.hp_cap_w = int(w); mock_settings.hp_cap_h = int(h)
+            applied.append("HP")
+        mp = res.get("mp")
+        if mp:
+            x, y, w, h = mp
+            mock_settings.mp_cap.x = int(x); mock_settings.mp_cap.y = int(y)
+            mock_settings.mp_cap_w = int(w); mock_settings.mp_cap_h = int(h)
+            applied.append("MP")
+        if applied:
+            autobar_status.setText(
+                f"자동 찾기 적용: {'+'.join(applied)} — 미세조정은 아래 X/Y/W/H로")
+            bus.settings_dirty.emit()
+        else:
+            autobar_status.setText(
+                "빨강/파랑 막대를 못 찾음 — 게이지가 가득 찬 상태에서 다시 시도")
+    autobar_btn.clicked.connect(_auto_find_bars)
+    autobar_row.addWidget(autobar_btn)
+    autobar_row.addWidget(autobar_status, 1)
+    roi.add(autobar_row)
+
     # HP
     roi.add(_coord_block(
         "HP",

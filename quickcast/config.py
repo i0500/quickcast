@@ -73,18 +73,18 @@ class RoiProfile(BaseModel):
     a profile here lets desktop (16:9) and laptop (16:10 / 3:2 / etc.)
     coordinates coexist without one stomping the other.
     """
-    hp_cap: Point = Field(default_factory=lambda: Point(x=78, y=24))
-    hp_cap_w: int = 160
-    hp_cap_h: int = 5
-    mp_cap: Point = Field(default_factory=lambda: Point(x=76, y=35))
-    mp_cap_w: int = 157
-    mp_cap_h: int = 6
-    pk_cap: Point = Field(default_factory=lambda: Point(x=1062, y=534))
-    pk_cap_w: int = 43
-    pk_cap_h: int = 45
-    potion_cap: Point = Field(default_factory=lambda: Point(x=483, y=629))
-    potion_cap_w: int = 41
-    potion_cap_h: int = 40
+    hp_cap: Point = Field(default_factory=lambda: Point(x=82, y=24))
+    hp_cap_w: int = 151
+    hp_cap_h: int = 9
+    mp_cap: Point = Field(default_factory=lambda: Point(x=82, y=37))
+    mp_cap_w: int = 168
+    mp_cap_h: int = 9
+    pk_cap: Point = Field(default_factory=lambda: Point(x=1078, y=537))
+    pk_cap_w: int = 50
+    pk_cap_h: int = 49
+    potion_cap: Point = Field(default_factory=lambda: Point(x=487, y=634))
+    potion_cap_w: int = 32
+    potion_cap_h: int = 29
     # Buff-count badge (top-left "75" circle). Used by the town-idle
     # recovery trigger — see BuffCounter / RecoverySettings.trigger_town_idle.
     buff_cap: Point = Field(default_factory=lambda: Point(x=4, y=63))
@@ -121,10 +121,10 @@ def classify_aspect(width: int, height: int) -> str:
 # Tuned for the original 1280×720 Lineage W layout; users with other
 # resolutions then drag from these starting points.
 ROI_DEFAULTS: dict[str, tuple[int, int, int, int]] = {
-    "hp":          (78,   24, 160,  5),
-    "mp":          (76,   35, 157,  6),
-    "pk":          (1062, 534, 43, 45),
-    "potion":      (483,  629, 41, 40),
+    "hp":          (82,   24, 151,  9),
+    "mp":          (82,   37, 168,  9),
+    "pk":          (1078, 537, 50, 49),
+    "potion":      (487,  634, 32, 29),
     "hp_text":     (60,   18, 200, 18),
     "mp_text":     (60,   40, 200, 18),
     "potion_text": (560,  600, 64, 28),
@@ -175,9 +175,9 @@ class PkSlot(BaseModel):
     delay: float = 0.2
     cooltime: float = 3.0
     repeat: bool = True
-    cap: Point = Field(default_factory=lambda: Point(x=1062, y=534))
-    cap_w: int = 43
-    cap_h: int = 45
+    cap: Point = Field(default_factory=lambda: Point(x=1078, y=537))
+    cap_w: int = 50
+    cap_h: int = 49
     threshold: int = 3_050_000
     # 감지 상태가 이 시간(초) 이상 연속 유지될 때만 발동. 펫 오버레이
     # 자동닫기와 동일한 오탐 방지 패턴. 0 ⇒ 즉시 발동(예전 동작).
@@ -192,9 +192,9 @@ class PotionSlot(BaseModel):
     key: str = "0"
     count: int = 3
     delay: float = 0.2
-    cap: Point = Field(default_factory=lambda: Point(x=483, y=629))
-    cap_w: int = 41
-    cap_h: int = 40
+    cap: Point = Field(default_factory=lambda: Point(x=487, y=634))
+    cap_w: int = 32
+    cap_h: int = 29
     # NORMED template-match (recognition.py) returns 0..250_000 for
     # potion. 150_000 ≈ 60% NORMED — calibrated against the real game
     # icon at 1280×720 client resolution.
@@ -387,12 +387,12 @@ class ClientProfile(BaseModel):
     capture_monitor_index: int = 1
 
     # ROI — bar regions
-    hp_cap: Point = Field(default_factory=lambda: Point(x=78, y=24))
-    hp_cap_w: int = 160
-    hp_cap_h: int = 5
-    mp_cap: Point = Field(default_factory=lambda: Point(x=76, y=35))
-    mp_cap_w: int = 157
-    mp_cap_h: int = 6
+    hp_cap: Point = Field(default_factory=lambda: Point(x=82, y=24))
+    hp_cap_w: int = 151
+    hp_cap_h: int = 9
+    mp_cap: Point = Field(default_factory=lambda: Point(x=82, y=37))
+    mp_cap_w: int = 168
+    mp_cap_h: int = 9
 
     # ROI — OCR text regions (0×0 means "not configured")
     hp_text_cap: Point = Field(default_factory=lambda: Point(x=0, y=0))
@@ -470,12 +470,12 @@ class Settings(BaseModel):
     # HP/MP capture regions — calibrated defaults from real-game testing
     # at 1280×720 client resolution. Users can re-drag in the dashboard
     # if their UI scale differs.
-    hp_cap: Point = Field(default_factory=lambda: Point(x=78, y=24))
-    hp_cap_w: int = 160
-    hp_cap_h: int = 5
-    mp_cap: Point = Field(default_factory=lambda: Point(x=76, y=35))
-    mp_cap_w: int = 157
-    mp_cap_h: int = 6
+    hp_cap: Point = Field(default_factory=lambda: Point(x=82, y=24))
+    hp_cap_w: int = 151
+    hp_cap_h: int = 9
+    mp_cap: Point = Field(default_factory=lambda: Point(x=82, y=37))
+    mp_cap_w: int = 168
+    mp_cap_h: int = 9
 
     # Text-mode OCR regions. When non-empty (w*h > 0) AND digit
     # templates have been learned, recognition prefers OCR over the

@@ -1205,6 +1205,48 @@ class AppWindow(AppShell):
             pass
 
     # ───────── capture hot-swap ─────────
+    def _swap_to_blank(self) -> None:
+        """활성 클라의 캡처를 검은 프레임(BlankCapture)으로 교체한다 — 캡처 대상을
+        '지우기' 한 뒤 모니터링이 이전 게임창에 멈춰 있지 않고 '대상 없음' 검은
+        화면을 보이게 한다. 입력 백엔드 타깃은 그대로 두되 hwnd 추적만 비운다."""
+        if self.controller is None:
+            return
+        try:
+            from quickcast.core.capture import BlankCapture
+        except Exception:
+            return
+        active_cid = self.settings.active_client_id
+        standby = getattr(self.controller, "_standby_runtimes", {}) or {}
+        target_controller = None
+        if self.controller.client_id == active_cid:
+            target_controller = self.controller
+        elif active_cid in standby:
+            target_controller = standby[active_cid].get("controller")
+        if target_controller is None:
+            return
+        # 이미 검은 프레임이면 중복 교체하지 않는다.
+        if type(getattr(target_controller, "capture", None)).__name__ == "BlankCapture":
+            return
+        old = getattr(target_controller, "capture", None)
+        target_controller.capture = BlankCapture()
+        try:
+            if old is not None:
+                old.close()
+        except Exception:
+            pass
+        target_controller._auto_hwnd = None
+        target_controller._auto_title = ""
+        try:
+            self.status_bar.update_capture(False, "대상 없음")
+        except Exception:
+            pass
+        try:
+            logger.info(
+                f"🗑️ [{self.settings.get_profile().label}] 캡처 대상 지움 → 검은 화면"
+            )
+        except Exception:
+            pass
+
     def _hot_swap_capture(self) -> None:
         """Update the active client's capture to ``capture_window_title``.
 
@@ -1223,6 +1265,9 @@ class AppWindow(AppShell):
             return
         title = self.settings.capture_window_title
         if not title:
+            # 캡처 대상 '지우기' → 활성 클라 컨트롤러 캡처를 검은 프레임으로 교체.
+            # (기존엔 그냥 return 이라 모니터링이 이전 게임창 프레임에 멈춰 있었다.)
+            self._swap_to_blank()
             return
         try:
             from quickcast.utils.window_finder import (

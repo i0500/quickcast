@@ -93,22 +93,33 @@ class ArduinoBackend:
         return None
 
     def connect(self, port: str = "") -> bool:
-        target = port or self.port or self.auto_detect() or ""
-        if not target:
+        # 저장/지정 포트를 먼저 시도하고, 열기에 실패하면 자동탐지 포트로 폴백한다.
+        # USB 재꽂음·드라이버 재설치 등으로 COM 번호가 바뀌면 예전 포트가 안 열리는데,
+        # 그때 새 포트를 자동으로 찾아 연결한다. (기존엔 한 포트만 골라 시도하고
+        # 그게 실패하면 그대로 포기 — 자동탐지 폴백이 없었다.)
+        candidates = []
+        first = port or self.port
+        if first:
+            candidates.append(first)
+        auto = self.auto_detect()
+        if auto and auto not in candidates:
+            candidates.append(auto)
+        if not candidates:
             logger.warning("⚠️ Arduino 포트 미지정 + 자동 감지 실패")
             return False
-        try:
-            with self._lock:
-                if self._serial and self._serial.is_open:
-                    self._serial.close()
-                self._serial = serial.Serial(target, self.baud, timeout=0.5)
-                self.port = target
-            self._ensure_worker()
-            logger.success(f"🔌 Arduino 연결됨: {target} @ {self.baud}bps")
-            return True
-        except serial.SerialException as e:
-            logger.error(f"❌ Arduino 연결 실패: {e}")
-            return False
+        for target in candidates:
+            try:
+                with self._lock:
+                    if self._serial and self._serial.is_open:
+                        self._serial.close()
+                    self._serial = serial.Serial(target, self.baud, timeout=0.5)
+                    self.port = target
+                self._ensure_worker()
+                logger.success(f"🔌 Arduino 연결됨: {target} @ {self.baud}bps")
+                return True
+            except serial.SerialException as e:
+                logger.error(f"❌ Arduino 연결 실패: {target}: {e}")
+        return False
 
     def reconnect(self) -> bool:
         return self.connect(self.port)
